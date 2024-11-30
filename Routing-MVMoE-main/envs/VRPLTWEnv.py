@@ -48,6 +48,225 @@ class Step_State:
     # shape: (batch, pomo)
     current_coord: torch.Tensor = None
     # shape: (batch, pomo, 2)
+    current_routes: torch.Tensor = None
+    # shape:(batch,pomo,problem)
+    cur_demands: torch.Tensor = None
+    # shape:(batch,problem)
+    cur_travel_time_routes: torch.Tensor = None
+    # shape: (batch, pomo, problem)
+    tw_start_routes: torch.Tensor = None
+    tw_end_routes: torch.Tensor = None
+    truck_num: torch.Tensor = None
+
+
+
+
+    max_route: int = 0
+
+
+def update_route(node_xy, depot, truck_num, cur_routes,routes_cost,  selected_node, selected_route, speed = 1.0):
+    '''
+    Update routes each decode time
+    node_xy: Tensor shape (batch, n, 2) contains coord of n customer
+    depot: Tensor shape (batch, 2)     contains coord of depot point
+    truck_num: Tensor shape (batch, pomo, n) contains  number of customer in route, maximize n route, if just use m < n route, padding 0
+    cur_routes: Tensor shape (batch, pomo, n, n) each routes contains index of customer, padding 0
+    routes_cost: Tensor shape (batch, pomo, n, n + 1) cost of from right previous of each customer, add value from last node to depot, padding 0
+    selected_node: Tensor shape(batch, pomo) contains customer index chosen by model
+    selected_route: Tensor shape(batch, pomo) contain route index chosen by model
+    Return:
+        new_routes // same as cur_routes, but is inserted selected customer into selected route
+        shape(batch, pomo, n, n)
+
+    '''
+    batch, pomo, _, n = cur_routes.shape()
+    BATCH_IDX = torch.arange(batch)[:, None].expand(batch, pomo)
+    POMO_IDX = torch.arange(pomo)[None, :].expand(batch, pomo)
+    raw_selected_route = selected_route.clone()
+    selected_route = selected_route.unsqueeze(-1)
+    node_num = torch.gather(truck_num, 2, selected_route) # shape (batch, pomo, 1)
+    node_num = node_num -1
+    selected_route_expand = selected_route.unsqueeze(-1).expand(-1, -1, 1, n)
+    nodes_route = torch.gather(cur_routes, 2, selected_route_expand).squeeze(2)
+
+    node_xy_expand = node_xy.unqueeze(1).expand(-1, pomo, -1, -1)
+    raw_selected_node = selected_node.clone()
+    selected_node = selected_node.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 2)
+    selected_node_coord = torch.gather(node_xy_expand, 2, selected_node)
+    nodes_route_expand = nodes_route.unsqueeze(-1).expand(-1,-1,-1,2)
+    nodes_route_coords = torch.gather(node_xy_expand, 2, nodes_route_expand) #shape (batch, pomo, n, 2)
+    node_num_expand = node_num.unsqueeze(-1).expand(-1, -1, -1, 2) # shape(batch, pomo, 1, 2)
+    last_node_coord = torch.gather(nodes_route_coords, 2, node_num_expand) #shape(batch, pomo,1, 2)
+    depot_expand = depot.unsqueeze(1).unsqueeze(1).expand(-1, pomo, 1, -1)
+    distance_lastnode_depot = torch.sqrt(torch.sum((last_node_coord - depot_expand) ** 2, dim=-1))
+    #shape(batch, pomo, 1)
+    distance_selected_depot = torch.sqrt(torch.sum((selected_node_coord - depot_expand) ** 2, dim=-1))
+    #shape(batch, pomo, 1)
+    distances = torch.sqrt(torch.sum((selected_node_coord - nodes_route_coords) ** 2, dim=-1))
+    # shape(batch, pomo, n)
+
+    range_tensor = torch.arange(n).unsqueeze(0).unsqueeze(0)  # Shape: (1, 1, n)
+    
+    padding = range_tensor > node_num 
+    padding = padding*10 #shape (batch, pomo, n)
+    distances = distances + padding
+
+    new_distances = distances.clone()
+    new_distances = torch.concat((distance_selected_depot, new_distances), dim = 2) # shape (batch, pomo, n + 1)
+    node_num = node_num + 1
+    distances[BATCH_IDX, POMO_IDX, node_num.squeeze(2)] = distance_lastnode_depot
+    distance_lastnode_depot = distance_lastnode_depot*10
+    distances = torch.concat((distances,distance_lastnode_depot ), dim = 2) # shape (batch, pomo, n + 1)
+    lost_index = raw_selected_route.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, n + 1)
+    lost_distance = torch.gather(routes_cost, 2,lost_index ).squeeze(2) #shape(batch, pomo, n+1)
+    inserted_cost = new_distances + distances - lost_distance #shape (batch, pomo, n + 1)
+    insert_index = torch.argmin(inserted_cost, dim = 2) # shape (batch, pomo)
+    new_nodes_route = torch.zeros((batch,pomo, n + 1))
+    expanded_indices = torch.arange(n + 1).expand(batch,pomo, -1)  # Shape: (batch, n)
+    mask_before = expanded_indices < insert_index.unsqueeze(1)  # Shape: (batch, n+1)
+    mask_after = expanded_indices > insert_index.unsqueeze(1)
+    new_nodes_route[mask_before] = nodes_route[mask_before[:, :, :-1]]
+    new_nodes_route[mask_after] = nodes_route[mask_after[:, :, 1:]]
+    new_nodes_route[BATCH_IDX, POMO_IDX,  insert_index] = raw_selected_node
+    cur_routes[BATCH_IDX, POMO_IDX, raw_selected_route] = new_nodes_route[:, :, :-1]
+    return cur_routes # shape (batch, pomo, n, n)
+
+
+
+
+
+
+
+
+
+
+
+    
+
+
+    indexs shape (batch,)
+    nalue_nodes (batch, n)
+    return: value shape (batch,)
+
+
+
+
+def calculate_travel_time(depot_xy, depot_node_xy, node_indices, truck_num, speed=1.0):
+    """
+    Computes the travel time from the depot to a set of nodes identified by indices.
+
+    Args:
+        depot_xy (torch.Tensor): Tensor of shape (batch, 1, 2) representing depot coordinates.
+        depot_node_xy (torch.Tensor): Tensor of shape (batch, n, 2) representing coordinates of all nodes.
+        node_indices (torch.Tensor): Tensor of shape (batch, m) containing indices of nodes to calculate travel time for.
+        speed (float): Travel speed, default is 1.0.
+
+    Returns:
+        torch.Tensor: Tensor of shape (batch, m) representing travel times from depot to each selected node.
+    """
+    # Gather node coordinates using the indices
+    selected_node_xy = torch.gather(depot_node_xy, 1, node_indices.unsqueeze(-1).expand(-1, -1, 2))  # Shape: (batch, m, 2)
+
+    # Compute the difference in coordinates
+    delta = selected_node_xy - depot_xy  # Shape: (batch, m, 2)
+
+    # Compute Euclidean distances
+    distances = torch.sqrt(torch.sum(delta ** 2, dim=-1))  # Shape: (batch, m)
+
+    # Compute travel time by dividing distance by speed
+    travel_times = distances / speed
+    batch, m = travel_times.shape
+
+    # Create a range tensor to compare with truck_num
+    range_tensor = torch.arange(m, device=travel_times.device).unsqueeze(0)  # Shape: (1, m)
+
+    # Create a mask based on truck_num
+    mask = range_tensor < truck_num.unsqueeze(1)  # Shape: (batch, m)
+
+    # Apply mask to travel_time
+    travel_times = travel_times * mask  # Masked values are set to 0
+    
+    n = depot_node_xy.size(1) - 1
+
+    # Initialize result matrix with zeros
+    travel_matrix = torch.zeros((batch, n, n), device=travel_times.device)
+
+    # Fill the first m values of each row in the n x n matrix
+    travel_matrix[:, :m, 0] = travel_times
+
+    return travel_matrix
+def calculate_tw_demand_index(tw_start, tw_end,demands,  node_indices, truck_num,  pomo = 1):
+    '''
+    Calculate the time windows for current routes
+    tw_start: Tensor shape (batch, n)
+    tw_end: Tensor shape (batch, n)
+    demands: Tensor shape (batch, n)
+    node_indices: Tensor shape(batch, m)
+    Return:
+        tw_start_routes: Tensor shape (batch, pomo, n, n)
+        tw_end_routes: Tensor shape (batch, pomo, n, n)
+    '''
+    # Gather node coordinates using the indices
+    selected_tw_start = torch.gather(tw_start, 1, node_indices.unsqueeze(-1).expand(-1, -1, 2))  # Shape: (batch, m, 2)
+    selected_tw_end = torch.gather(tw_end, 1, node_indices.unsqueeze(-1).expand(-1, -1, 2))  # Shape: (batch, m, 2)
+    selected_routes = node_indices.unsqueeze(-1).expand(-1, -1, 2)
+    selected_demands_routes = torch.gather(demands, 1, node_indices)  # Shape: (batch, m)
+
+    batch, m = selected_tw_start.shape
+    n = tw_start.size(1)
+     # Create a range tensor to compare with truck_num
+    range_tensor = torch.arange(m, device=selected_tw_start.device).unsqueeze(0)  # Shape: (1, m)
+
+    # Create a mask based on truck_num
+    mask = range_tensor < truck_num.unsqueeze(1)  # Shape: (batch, m)
+
+    selected_tw_start = selected_tw_start * mask
+
+    # Initialize result matrix with zeros
+    tw_start_routes = torch.zeros((batch, n, n))
+
+    # Fill the first m values of each row in the n x n matrix
+    tw_start_routes[:, :m, 0] = selected_tw_start
+    tw_start_routes = tw_start_routes.unsqueeze(1).expand(batch, pomo, n, n)  # Shape: (batch, pomo, n, n)
+    
+    selected_tw_end = selected_tw_end * mask
+
+    # Initialize result matrix with zeros
+    tw_end_routes = torch.zeros((batch, n, n))
+
+    # Fill the first m values of each row in the n x n matrix
+    tw_end_routes[:, :m, 0] = selected_tw_end
+    tw_end_routes = tw_end_routes.unsqueeze(1).expand(batch, pomo, n, n)  # Shape: (batch, pomo, n, n)
+
+    # Initialize result matrix with zeros
+    routes = torch.zeros((batch, n, n))
+
+    # Fill the first m values of each row in the n x n matrix
+    routes[:, :m, 0] = selected_routes
+    routes = routes.unsqueeze(1).expand(batch, pomo, n, n)  # Shape: (batch, pomo, n, n)
+    selected_demands_routes = selected_demands_routes * mask
+
+
+    # Initialize result matrix with zeros
+    demands_routes = torch.zeros((batch, n))
+
+    # Fill the first m values of each row in the n x n matrix
+    demands_routes[:, :m] = selected_demands_routes
+    demands_routes = tw_end_routes.unsqueeze(1).expand(batch, pomo, n)  # Shape: (batch, pomo, n)
+
+
+
+    return routes, demands_routes,  tw_start_routes, tw_end_routes
+
+
+
+
+    
+
+
+
+
+
 
 
 class VRPLTWEnv:
@@ -65,6 +284,7 @@ class VRPLTWEnv:
         # Const @Load_Problem
         ####################################
         self.batch_size = None
+        self.num_problem = None
         self.BATCH_IDX = None
         self.POMO_IDX = None
         self.START_NODE = None
@@ -79,6 +299,7 @@ class VRPLTWEnv:
         # shape: (batch, problem+1)
         self.depot_node_tw_end = None
         # shape: (batch, problem+1)
+
         self.speed = 1.0
         self.depot_start, self.depot_end = 0., 3.  # tw for depot [0, 3]
 
@@ -118,10 +339,11 @@ class VRPLTWEnv:
 
     def load_problems(self, batch_size, problems=None, aug_factor=1):
         if problems is not None:
-            depot_xy, node_xy, node_demand, route_limit, service_time, tw_start, tw_end = problems
+            depot_xy, node_xy, node_demand, route_limit, service_time, tw_start, tw_end, init_routes, truck_num, max_demand = problems
         else:
-            depot_xy, node_xy, node_demand, route_limit, service_time, tw_start, tw_end = self.get_random_problems(batch_size, self.problem_size, normalized=True)
+            depot_xy, node_xy, node_demand, route_limit, service_time, tw_start, tw_end, init_routes, truck_num, max_demand = self.get_random_problems(batch_size, self.problem_size, normalized=True)
         self.batch_size = depot_xy.size(0)
+        self.num_problem = depot_xy.size(1)
         route_limit = route_limit[:, None] if route_limit.dim() == 1 else route_limit
 
         if aug_factor > 1:
@@ -145,6 +367,7 @@ class VRPLTWEnv:
         depot_tw_end = torch.ones(size=(self.batch_size, 1)).to(self.device) * self.depot_end
         # shape: (batch, 1)
         self.depot_node_demand = torch.cat((depot_demand, node_demand), dim=1)
+        self.max_demand = max_demand
         # shape: (batch, problem+1)
         self.route_limit = route_limit
         # shape: (batch, 1)
@@ -157,6 +380,7 @@ class VRPLTWEnv:
 
         self.BATCH_IDX = torch.arange(self.batch_size)[:, None].expand(self.batch_size, self.pomo_size).to(self.device)
         self.POMO_IDX = torch.arange(self.pomo_size)[None, :].expand(self.batch_size, self.pomo_size).to(self.device)
+        self.truck_num= truck_num
 
         self.reset_state.depot_xy = depot_xy
         self.reset_state.node_xy = node_xy
@@ -171,21 +395,38 @@ class VRPLTWEnv:
         self.step_state.open = torch.zeros(self.batch_size, self.pomo_size).to(self.device)
         self.step_state.START_NODE = torch.arange(start=1, end=self.pomo_size + 1)[None, :].expand(self.batch_size, -1).to(self.device)
         self.step_state.PROBLEM = self.problem
+        self.step_state.truck_num = self.truck_num.unsqueeze(1).expand(self.batch_size, self.pomo_size,-1)
+        
+        # padded_routes = torch.full((self.batch_size, self.problem_size), self.problem_size, dtype=init_routes.dtype)  # Shape: (2, 5)
+        # padded_routes[:,0] =  init_routes # init_routes.shape(batch,problem)
+        # init_routes = init_routes.expand(-1, self.pomo_size, -1)
+        # self.step_state.current_routes = init_routes
+        self.step_state.cur_travel_time_routes = calculate_travel_time(depot_xy, node_xy,init_routes, self.truck_num, self.speed).unsqueeze(1).expand(self.batch_size, self.pomo_size, self.problem_size, self.problem_size)
+        # self.step_state.cur_demands = torch.where(init_routes == self.problem_size, torch.tensor(0, dtype=torch.int32), node_demand)
+        self.step_state.current_routes, self.step_state.cur_demands, self.step_state.tw_start_routes, self.step_state.tw_end_routes = calculate_tw_demand_index(tw_start, tw_end, node_demand, init_routes, self.truck_num, self.pomo_size)
+
+
 
     def reset(self):
         self.selected_count = 0
         self.current_node = None
         # shape: (batch, pomo)
+        self.current_route = None
+        #shape: (batch, pomo)
         self.selected_node_list = torch.zeros((self.batch_size, self.pomo_size, 0), dtype=torch.long).to(self.device)
         # shape: (batch, pomo, 0~)
 
         self.at_the_depot = torch.ones(size=(self.batch_size, self.pomo_size), dtype=torch.bool).to(self.device)
         # shape: (batch, pomo)
-        self.load = torch.ones(size=(self.batch_size, self.pomo_size)).to(self.device)
+        self.load = torch.ones(size=(self.batch_size, self.pomo_size, self.problem_size)).to(self.device)
         # shape: (batch, pomo)
-        self.visited_ninf_flag = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size+1)).to(self.device)
+        self.visited_ninf_flag = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size, self.problem_size)).to(self.device)
+        zero_mask = (self.step_state.truck_num == 0)  # Shape: (batch, pomo, m)
+        zero_mask = zero_mask.unsqueeze(2).expand(self.batch_size, self.pomo_size, self.problem_size, -1)
+        self.visited_ninf_flag[zero_mask] = 1
+
         # shape: (batch, pomo, problem+1)
-        self.ninf_mask = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size+1)).to(self.device)
+        self.ninf_mask = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size,self.problem_size )).to(self.device)
         # shape: (batch, pomo, problem+1)
         self.finished = torch.zeros(size=(self.batch_size, self.pomo_size), dtype=torch.bool).to(self.device)
         # shape: (batch, pomo)
@@ -220,14 +461,10 @@ class VRPLTWEnv:
         # Dynamic-1
         ####################################
         self.selected_count += 1
-        self.current_node = selected
-        # shape: (batch, pomo)
-        self.selected_node_list = torch.cat((self.selected_node_list, self.current_node[:, :, None]), dim=2)
-        # shape: (batch, pomo, 0~)
+        self.current_node = selected//self.problem_size #shape (batch, pomo)
+        self.current_route = selected % self.problem_size #shape(batch, pomo)
+        self.step_state.current_routes, self.step_state.cur_demands = update_route()
 
-        # Dynamic-2
-        ####################################
-        self.at_the_depot = (selected == 0)
 
         demand_list = self.depot_node_demand[:, None, :].expand(self.batch_size, self.pomo_size, -1)
         # shape: (batch, pomo, problem+1)
@@ -236,29 +473,50 @@ class VRPLTWEnv:
         selected_demand = demand_list.gather(dim=2, index=gathering_index).squeeze(dim=2)
         # shape: (batch, pomo)
         self.load -= selected_demand
-        self.load[self.at_the_depot] = 1  # refill loaded at the depot
+        # # shape: (batch, pomo)
+        # self.selected_node_list = torch.cat((self.selected_node_list, self.current_node[:, :, None]), dim=2)
+        # # shape: (batch, pomo, 0~)
 
-        current_coord = self.depot_node_xy[torch.arange(self.batch_size)[:, None], selected]
-        # shape: (batch, pomo, 2)
-        new_length = (current_coord - self.current_coord).norm(p=2, dim=-1)
-        # shape: (batch, pomo)
-        self.length = self.length + new_length
-        self.length[self.at_the_depot] = 0  # reset the length of route at the depot
-        self.current_coord = current_coord
+        # # Dynamic-2
+        # ####################################
+        # self.at_the_depot = (selected == 0)
+
+        # demand_list = self.depot_node_demand[:, None, :].expand(self.batch_size, self.pomo_size, -1)
+        # # shape: (batch, pomo, problem+1)
+        # gathering_index = selected[:, :, None]
+        # # shape: (batch, pomo, 1)
+        # selected_demand = demand_list.gather(dim=2, index=gathering_index).squeeze(dim=2)
+        # # shape: (batch, pomo)
+        # self.load -= selected_demand
+        # self.load[self.at_the_depot] = 1  # refill loaded at the depot
+
+        # current_coord = self.depot_node_xy[torch.arange(self.batch_size)[:, None], selected]
+        # # shape: (batch, pomo, 2)
+        # new_length = (current_coord - self.current_coord).norm(p=2, dim=-1)
+        # # shape: (batch, pomo)
+        # self.length = self.length + new_length
+        # self.length[self.at_the_depot] = 0  # reset the length of route at the depot
+        # self.current_coord = current_coord
 
         # Mask
-        ####################################
-        self.visited_ninf_flag[self.BATCH_IDX, self.POMO_IDX, selected] = float('-inf')
-        # shape: (batch, pomo, problem+1)
-        self.visited_ninf_flag[:, :, 0][~self.at_the_depot] = 0  # depot is considered unvisited, unless you are AT the depot
-
+        self.visited_ninf_flag[self.BATCH_IDX, self.POMO_IDX, self.current_node,:] = 1
+       
         # capacity constraint
         self.ninf_mask = self.visited_ninf_flag.clone()
+        cap_mask = self.step_state.cur_demands >= self.max_demand.unqueeze(2)
+        cap_mask = cap_mask.unsqueeze(2).expand(self.batch_size, self.pomo_size, self.problem_size, -1)
+        self.ninf_mask[cap_mask] = 1
+
+        #route limit constraint
+        
+
+
+
         round_error_epsilon = 0.00001
-        demand_too_large = self.load[:, :, None] + round_error_epsilon < demand_list
-        # shape: (batch, pomo, problem+1)
-        self.ninf_mask[demand_too_large] = float('-inf')
-        # shape: (batch, pomo, problem+1)
+        # demand_too_large = self.load[:, :, None] + round_error_epsilon < demand_list
+        # # shape: (batch, pomo, problem+1)
+        # self.ninf_mask[demand_too_large] = float('-inf')
+        # # shape: (batch, pomo, problem+1)
 
         # duration limit constraint
         route_limit = self.route_limit[:, :, None].expand(self.batch_size, self.pomo_size, self.problem_size + 1)
@@ -430,3 +688,6 @@ class VRPLTWEnv:
         # shape: (8*batch, N, 2)
 
         return aug_xy_data
+
+
+    
