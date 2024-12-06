@@ -41,7 +41,7 @@ class MOEModel(nn.Module):
 
         self.encoded_nodes, moe_loss = self.encoder( node_xy_demand_tw)
         self.aux_loss = moe_loss
-        # shape: (batch, problem+1, embedding)
+        # shape: (batch, problem, embedding)
         self.decoder.set_q_last(self.encoded_nodes)
 
 
@@ -123,33 +123,41 @@ def _get_encoding(encoded_nodes, node_index_to_pick):
 
     return picked_nodes
 
-def get_routes_encoding(encoded_nodes, route_index, postion_encodings):
+def get_routes_encoding(encoded_nodes, route_index, postion_encodings, truck_num):
     # encoded_nodes.shape: (batch, problem, embedding)
     # route_index.shape: (batch, pomo, problem,problem)
     # postion_encodings.shape: (batch, problem, 1)
-    postioned_encoded_nodes = torch.concat([encoded_nodes, postion_encodings], dim = -1)
+    # postioned_encoded_nodes = torch.concat([encoded_nodes, postion_encodings], dim = -1)
     batch_size = route_index.size(0)
     pomo = route_index.size(1)
-    embedding = postioned_encoded_nodes.size(2)
-    zeros_tensor = torch.zeros(batch_size, 1, embedding)
-    postioned_encoded_nodes = torch.concat([postioned_encoded_nodes, zeros_tensor], dim = 1) #shape (batch, problem +1, embedding + 1 )
+    n = route_index.size(2)
+    embedding = encoded_nodes.size(2)
+    # zeros_tensor = torch.zeros(batch_size, 1, embedding)
+    # postioned_encoded_nodes = torch.concat([postioned_encoded_nodes, zeros_tensor], dim = 1) #shape (batch, problem +1, embedding + 1 )
 
 
 
     # Mở rộng encoded_nodes để thêm chiều "pomo"
-    encoded_nodes_expanded = postioned_encoded_nodes.unsqueeze(1)  # Shape: (batch, 1, problem, embedding)
+    encoded_nodes_expanded = encoded_nodes.unsqueeze(1)  # Shape: (batch, 1, problem, embedding)
 
     # Sử dụng route_index để gather
     # Chuyển route_index về kích thước tương ứng với encoded_nodes_expanded
     route_index_expanded = route_index.unsqueeze(-1).expand(-1, -1, -1, -1, embedding)  # Shape: (batch, pomo, problem, problem, embedding)
 
     # Gather encoded_nodes theo route_index
-    encode_route = torch.gather(encoded_nodes_expanded.expand(-1, pomo, -1, -1), 2, route_index_expanded)  # Shape: (batch, pomo, problem, problem, embedding)
+    encode_routes = torch.gather(encoded_nodes_expanded.expand(-1, pomo, -1, -1), 2, route_index_expanded)  # Shape: (batch, pomo, problem, problem, embedding)
+    encode_routes = torch.concat((encode_routes, postion_encodings[:, :, :, :-1].unsqueeze(-1)))
+    range_tensor = torch.arange(n).unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(-1) # Shape: (1, 1, 1, n)
+    
+    mask = range_tensor < truck_num.unsqueeze(-1).unsqueeze(-1)
+    encode_routes = encode_routes*mask
+    
+
 
     # Nếu chỉ muốn shape (batch, pomo, problem, problem), bạn có thể chọn trung bình hoặc giá trị cụ thể theo embedding
-    encode_route = encode_route.mean(2)  # Hoặc torch.mean(encode_route, dim=-1)
+    encode_routes = encode_routes.mean(3)  # Hoặc torch.mean(encode_route, dim=-1)
 
-    return encode_route # shape(batch, pomo, problem, embedding)
+    return encode_routes # shape(batch, pomo, problem, embedding)
 
 
 
