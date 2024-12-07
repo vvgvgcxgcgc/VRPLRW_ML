@@ -6,10 +6,10 @@ from utils import *
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate datasets")
-    parser.add_argument('--problem', type=str, default="ALL", choices=["ALL", "CVRP", "OVRP", "VRPB", "VRPL", "VRPTW", "OVRPTW",
+    parser.add_argument('--problem', type=str, default="VRPL", choices=["ALL", "CVRP", "OVRP", "VRPB", "VRPL", "VRPTW", "OVRPTW",
                                                                        "OVRPB", "OVRPL", "VRPBL", "VRPBTW", "VRPLTW",
                                                                        "OVRPBL", "OVRPBTW", "OVRPLTW", "VRPBLTW", "OVRPBLTW"])
-    parser.add_argument('--problem_size', type=int, default=50)
+    parser.add_argument('--problem_size', type=int, default=100)
     parser.add_argument('--pomo_size', type=int, default=50, help="the number of start node, should <= problem size")
     parser.add_argument('--num_samples', type=int, default=1000)
     parser.add_argument('--seed', type=int, default=2025)
@@ -35,7 +35,7 @@ if __name__ == "__main__":
     envs = get_env(args.problem)
     for env in envs:
         env = env(**env_params)
-        dataset_path = os.path.join(args.dir, env.problem, "{}{}_uniform.pkl".format(env.problem.lower(), args.problem_size))
+        dataset_path = os.path.join(args.dir, env.problem, "{}{}_new_uniform.pkl".format(env.problem.lower(), args.problem_size))
         env.generate_dataset(args.num_samples, args.problem_size, dataset_path)
         # sanity check
         env.load_dataset(dataset_path, num_samples=args.num_samples, disable_print=False)
