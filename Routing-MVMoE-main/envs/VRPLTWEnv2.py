@@ -352,7 +352,7 @@ class VRPLTWEnv:
         self.loc_scaler = env_params['loc_scaler'] if 'loc_scaler' in env_params.keys() else None
         self.device = torch.device('cuda', torch.cuda.current_device()) if 'device' not in env_params.keys() else env_params['device']
 
-        self.pkl_path = "VRPLRW_ML/Routing-MVMoE-main/gen_data/data.pkl"
+        self.pkl_path = "VRPLRW_ML/Routing-MVMoE-main/gen_data/data50_50k.pkl"
         self.dataset = None
 
         # Const @Load_Problem
