@@ -69,10 +69,10 @@ class Step_State:
 
 def update_duration_mask(cur_mask, cur_routes, routes_cost, service_time,   max_duration, truck_num, selected_route, node_xy, depot, speed = 1.0):
     batch, pomo, n, _ = cur_routes.shape
-    
-    BATCH_IDX = torch.arange(batch)[:, None, None].expand(batch, pomo, n)
-    POMO_IDX = torch.arange(pomo)[None, :, None].expand(batch, pomo, n)
-    ROUTE_IDX =  torch.arange(pomo)[None, None, :].expand(batch, pomo, n)
+    device = cur_mask.device
+    BATCH_IDX = torch.arange(batch)[:, None, None].expand(batch, pomo, n).to(device)
+    POMO_IDX = torch.arange(pomo)[None, :, None].expand(batch, pomo, n).to(device)
+    ROUTE_IDX =  torch.arange(pomo)[None, None, :].expand(batch, pomo, n).to(device)
 
     selected_route_cost = torch.gather(routes_cost, 2, selected_route.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, n + 1)).squeeze(2)
     nodes_route = torch.gather(cur_routes, 2, selected_route.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, n)).squeeze(2)
@@ -87,7 +87,7 @@ def update_duration_mask(cur_mask, cur_routes, routes_cost, service_time,   max_
     # nodes_route_coords[:, :, 2, :] = torch.where(cur_index.unsqueeze(-1).expand(-1, -1, 2) < nodes_num.unsqueeze(-1).expand(-1, -1, 2), nodes_route_coords[:, :, 2, :], depot.unsqueeze(1).expand(-1, pomo, -1))
     distances= torch.sqrt(torch.sum((nodes_route_coords.unsqueeze(2) - node_xy_expand.unsqueeze(3)) ** 2, dim=-1))/speed  # shape (batch, pomo, n, n)
     xy_depot = torch.sqrt(torch.sum((depot.unsqueeze(1).unsqueeze(2).unsqueeze(2).expand(-1, pomo, 1,1, -1) - node_xy_expand.unsqueeze(3)) ** 2, dim = -1))/ speed #shape(batch, pomo, n, 1)
-    range_tensor = torch.arange(n).unsqueeze(0).unsqueeze(0).unsqueeze(0)# Shape: (1, 1, 1, n)
+    range_tensor = torch.arange(n).unsqueeze(0).unsqueeze(0).unsqueeze(0).to(device)# Shape: (1, 1, 1, n)
 
     padding = range_tensor > nodes_num.unsqueeze(-1)
     padding = padding*10 #shape (batch, pomo, n, n)
@@ -96,7 +96,7 @@ def update_duration_mask(cur_mask, cur_routes, routes_cost, service_time,   max_
     new_distances = torch.concat((xy_depot, new_distances), dim = 3) # shape (batch, pomo, n, n+1)
     distances[BATCH_IDX, POMO_IDX,ROUTE_IDX, nodes_num + 1] = xy_depot.squeeze(-1)
     selected_route_service_time = selected_route_service_time.unsqueeze(2).expand(-1, -1, n, -1)
-    zero = torch.zeros((batch, pomo, n))
+    zero = torch.zeros((batch, pomo, n)).to(device)
 
     selected_route_service_time[BATCH_IDX, POMO_IDX,ROUTE_IDX, nodes_num + 1] = zero
     xy_depot = xy_depot*500
@@ -123,9 +123,9 @@ def update_demand_mask(cur_demands, node_demand, cur_mask, max_demand, selected_
         max_demand Tensor shape(batch)
     '''
     batch,pomo,n = cur_demands.shape()
-
-    BATCH_IDX = torch.arange(batch)[:, None].expand(batch, pomo)
-    POMO_IDX = torch.arange(pomo)[None, :].expand(batch, pomo)
+    device = cur_demands.device
+    BATCH_IDX = torch.arange(batch)[:, None].expand(batch, pomo).to(device)
+    POMO_IDX = torch.arange(pomo)[None, :].expand(batch, pomo).to(device)
     selected_route_demand = torch.gather(cur_demands, 2, selected_route.unsqueeze(-1))
     node_demand = node_demand.unsqueeze(1).expand(-1, pomo, n)
     round_error_epsilon = 0.00001
@@ -154,10 +154,11 @@ def update_route(node_xy, depot,node_demand,service_time, cur_demands, truck_num
         insert_index
         selected_route_index
     '''
+    device = node_xy.device
     batch, pomo, _, n = cur_routes.shape
-    BATCH_IDX = torch.arange(batch)[:, None, None].expand(batch, pomo, n)
-    POMO_IDX = torch.arange(pomo)[None, :, None].expand(batch, pomo, n)
-    ROUTE_IDX =  torch.arange(pomo)[None, None, :].expand(batch, pomo, n)
+    BATCH_IDX = torch.arange(batch)[:, None, None].expand(batch, pomo, n).to(device)
+    POMO_IDX = torch.arange(pomo)[None, :, None].expand(batch, pomo, n).to(device)
+    ROUTE_IDX =  torch.arange(pomo)[None, None, :].expand(batch, pomo, n).to(device)
     # raw_selected_route = selected_route.clone()
     # selected_route = selected_route.unsqueeze(-1)
     # node_num = torch.gather(truck_num, 2, selected_route) # shape (batch, pomo, 1)
@@ -183,7 +184,7 @@ def update_route(node_xy, depot,node_demand,service_time, cur_demands, truck_num
     distances = torch.sqrt(torch.sum((selected_node_coord - nodes_route_coords) ** 2, dim=-1)) / speed
     # shape(batch, pomo,n,  n)
 
-    range_tensor = torch.arange(n).unsqueeze(0).unsqueeze(0).unsqueeze(0) # Shape: (1, 1, 1, n)
+    range_tensor = torch.arange(n).unsqueeze(0).unsqueeze(0).unsqueeze(0).to(device) # Shape: (1, 1, 1, n)
     
     padding = range_tensor > node_num.unsqueeze(-1)
     padding = padding*10 #shape (batch, pomo, n, n)
@@ -198,7 +199,7 @@ def update_route(node_xy, depot,node_demand,service_time, cur_demands, truck_num
     # lost_index = raw_selected_route.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, n + 1)
     # lost_distance = torch.gather(routes_cost, 2,lost_index ).squeeze(2) #shape(batch, pomo, n+1)
     inserted_cost = new_distances + distances - routes_cost #shape (batch, pomo,n, n + 1)
-    node_mask = node_mask*20
+    node_mask = node_mask*100
     inserted_cost = inserted_cost + node_mask.unsqueeze(-1)
     min_indices = torch.argmin(inserted_cost.view(batch,pomo, -1), dim=2)
     selected_route_index = min_indices // inserted_cost.size(-1) # shape(batch, pomo)
@@ -208,16 +209,16 @@ def update_route(node_xy, depot,node_demand,service_time, cur_demands, truck_num
     lost_distance = torch.gather(routes_cost, 2, selected_route_index.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, n + 1)).squeeze(2)
     selected_dis = torch.gather(distances, 2, selected_route_index.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, n + 1)).squeeze(2)
     selected_new_dis = torch.gather(new_distances, 2, selected_route_index.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, n + 1)).squeeze(2)
-    new_nodes_route = torch.zeros((batch,pomo, n + 1),  dtype=torch.int64)
-    expanded_indices = torch.arange(n + 1).expand(batch,pomo, -1)  # Shape: (batch, n + 1)
+    new_nodes_route = torch.zeros((batch,pomo, n + 1),  dtype=torch.int64).to(device)
+    expanded_indices = torch.arange(n + 1).expand(batch,pomo, -1).to(device)  # Shape: (batch, n + 1)
     mask_before = expanded_indices < insert_index.unsqueeze(1)  # Shape: (batch, n+1)
     mask_after = expanded_indices > insert_index.unsqueeze(1)
     new_nodes_route[mask_before] = selected_node_route[mask_before[:, :, :-1]]
     new_nodes_route[mask_after] = selected_node_route[mask_after[:, :, 1:]]
     new_nodes_route[BATCH_IDX, POMO_IDX,  insert_index] = raw_selected_node
     cur_routes[BATCH_IDX, POMO_IDX, selected_route_index] = new_nodes_route[:, :, :-1]
-    new_route_cost = torch.zeros((batch, pomo, n + 2))
-    expanded_indices = torch.arange(n + 2).expand(batch,pomo, -1)  # Shape: (batch, n + 2)
+    new_route_cost = torch.zeros((batch, pomo, n + 2)).to(device)
+    expanded_indices = torch.arange(n + 2).expand(batch,pomo, -1).to(device)  # Shape: (batch, n + 2)
     mask_before = expanded_indices < insert_index.unsqueeze(1)  # Shape: (batch, n+2)
     mask_after = expanded_indices > insert_index.unsqueeze(1)
     new_route_cost[mask_before] = lost_distance[mask_before[:, :, :-1]]
@@ -253,6 +254,7 @@ def init_travel_time_demand( depot, node_xy, node_demand, service_time,  node_in
         torch.Tensor: Tensor of shape (batch, m) representing travel times from depot to each selected node.
     """
     # Gather node coordinates using the indices
+    device = depot.device
     routes_demand = torch.gather(node_demand, 1, node_indices)
     routes_demand = routes_demand * truck_num
 
@@ -274,7 +276,7 @@ def init_travel_time_demand( depot, node_xy, node_demand, service_time,  node_in
     n = node_xy.size(1)
 
     # Initialize result matrix with zeros
-    travel_matrix = torch.zeros((batch, n, n + 1), device=travel_times.device)
+    travel_matrix = torch.zeros((batch, n, n + 1), device=device)
 
     # Fill the first m values of each row in the n x n matrix
     travel_matrix[:, :m, 0] = travel_times + selected_service_time
@@ -290,7 +292,7 @@ def init_travel_time_demand( depot, node_xy, node_demand, service_time,  node_in
 
 
 
-    routes_matrix = torch.zeros((batch, n, n ), device=travel_times.device)
+    routes_matrix = torch.zeros((batch, n, n ), device=device)
     routes_matrix[:, :m, 0] = node_indices
 
    
@@ -401,6 +403,7 @@ class VRPLTWEnv:
         # shape: (batch, problem+1)
 
         self.speed = 1.0
+        self.speed = self.speed.to(self.device)
         self.depot_start, self.depot_end = 0., 3.  # tw for depot [0, 3]
 
         # Dynamic-1
@@ -413,24 +416,24 @@ class VRPLTWEnv:
 
         # Dynamic-2
         ####################################
-        self.at_the_depot = None
-        # shape: (batch, pomo)
-        self.load = None
-        # shape: (batch, pomo)
-        self.visited_ninf_flag = None
-        # shape: (batch, pomo, problem+1)
-        self.ninf_mask = None
-        # shape: (batch, pomo, problem+1)
-        self.finished = None
-        # shape: (batch, pomo)
-        self.current_time = None
-        # shape: (batch, pomo)
-        self.length = None
-        # shape: (batch, pomo)
-        self.open = None
-        # shape: (batch, pomo)
-        self.current_coord = None
-        # shape: (batch, pomo, 2)
+        # self.at_the_depot = None
+        # # shape: (batch, pomo)
+        # self.load = None
+        # # shape: (batch, pomo)
+        # self.visited_ninf_flag = None
+        # # shape: (batch, pomo, problem+1)
+        # self.ninf_mask = None
+        # # shape: (batch, pomo, problem+1)
+        # self.finished = None
+        # # shape: (batch, pomo)
+        # self.current_time = None
+        # # shape: (batch, pomo)
+        # self.length = None
+        # # shape: (batch, pomo)
+        # self.open = None
+        # # shape: (batch, pomo)
+        # self.current_coord = None
+        # # shape: (batch, pomo, 2)
 
         # states to return
         ####################################
@@ -442,10 +445,10 @@ class VRPLTWEnv:
             depot_xy, node_xy, node_demand, route_limit, service_time, tw_start, tw_end, init_routes, mask_node, truck_num, max_demand = problems
         else:
             depot_xy, node_xy, node_demand, route_limit, service_time, tw_start, tw_end, init_routes, mask_node, truck_num, max_demand = self.get_random_problems(batch_size, self.problem_size, normalized=True)
-        self.batch_size = depot_xy.size(0)
+        self.batch_size = depot_xy.size(0).to(self.device)
         
-        self.num_problem = depot_xy.size(1)
-        self.mask_node = mask_node
+        self.num_problem = depot_xy.size(1).to(self.device)
+        self.mask_node = mask_node.to(self.device)
         # if aug_factor > 1:
         #     if aug_factor == 8:
         #         self.batch_size = self.batch_size * 8
@@ -458,41 +461,31 @@ class VRPLTWEnv:
         #         tw_end = tw_end.repeat(8, 1)
         #     else:
         #         raise NotImplementedError
-        self.node_xy = node_xy
-        self.depot = depot_xy
-        self.depot_node_xy = torch.cat((depot_xy, node_xy), dim=1)
+        self.node_xy = node_xy.to(self.device)
+        self.depot = depot_xy.to(self.device)
+        self.depot_node_xy = torch.cat((depot_xy, node_xy), dim=1).to(self.device)
 
         # shape: (batch, problem+1, 2)
-        depot_demand = torch.zeros(size=(self.batch_size, 1)).to(self.device)
-        depot_service_time = torch.zeros(size=(self.batch_size, 1)).to(self.device)
-        depot_tw_start = torch.ones(size=(self.batch_size, 1)).to(self.device) * self.depot_start
-        depot_tw_end = torch.ones(size=(self.batch_size, 1)).to(self.device) * self.depot_end
         # shape: (batch, 1)
-        self.node_demand = node_demand #shape (batch, n)
-        self.depot_node_demand = torch.cat((depot_demand, node_demand), dim=1)
-        self.max_demand = max_demand
+        self.node_demand = node_demand.to(self.device) #shape (batch, n)
+        self.max_demand = max_demand.to(self.device)
         # shape: (batch,)
-        self.route_limit = route_limit
-        self.init_routes = init_routes #shape(batch, pomo, n)
+        self.route_limit = route_limit.to(self.device)
+        self.init_routes = init_routes.to(self.device) #shape(batch, pomo, n)
         # shape: (batch, 1)
-        self.depot_node_service_time = torch.cat((depot_service_time, service_time), dim=1)
-        self.service_time = service_time
-        # shape: (batch, problem+1)
-        self.depot_node_tw_start = torch.cat((depot_tw_start, tw_start), dim=1)
-        # shape: (batch, problem+1)
-        self.depot_node_tw_end = torch.cat((depot_tw_end, tw_end), dim=1)
+        self.service_time = service_time.to(self.device)
         # shape: (batch, problem+1)
 
         self.BATCH_IDX = torch.arange(self.batch_size)[:, None].expand(self.batch_size, self.pomo_size).to(self.device)
         self.POMO_IDX = torch.arange(self.pomo_size)[None, :].expand(self.batch_size, self.pomo_size).to(self.device)
-        self.truck_num= truck_num
+        self.truck_num= truck_num.to(self.device)
 
-        self.reset_state.depot_xy = depot_xy
-        self.reset_state.node_xy = node_xy
-        self.reset_state.node_demand = node_demand
-        self.reset_state.node_service_time = service_time
-        self.reset_state.node_tw_start = tw_start
-        self.reset_state.node_tw_end = tw_end
+        self.reset_state.depot_xy = depot_xy.to(self.device)
+        self.reset_state.node_xy = node_xy.to(self.device)
+        self.reset_state.node_demand = node_demand.to(self.device)
+        self.reset_state.node_service_time = service_time.to(self.device)
+        self.reset_state.node_tw_start = tw_start.to(self.device)
+        self.reset_state.node_tw_end = tw_end.to(self.device)
         self.reset_state.prob_emb = torch.FloatTensor([1, 0, 0, 1, 1]).unsqueeze(0).to(self.device)  # bit vector for [C, O, B, L, TW]
 
         self.step_state.BATCH_IDX = self.BATCH_IDX
@@ -500,13 +493,13 @@ class VRPLTWEnv:
         # self.step_state.open = torch.zeros(self.batch_size, self.pomo_size).to(self.device)
         # self.step_state.START_NODE = torch.arange(start=1, end=self.pomo_size + 1)[None, :].expand(self.batch_size, -1).to(self.device)
         self.step_state.PROBLEM = self.problem
-        self.step_state.truck_num = self.truck_num.unsqueeze(1).expand(self.batch_size, self.pomo_size,-1)
+        self.step_state.truck_num = self.truck_num.unsqueeze(1).expand(self.batch_size, self.pomo_size,-1).to(self.device)
         
         # padded_routes = torch.full((self.batch_size, self.problem_size), self.problem_size, dtype=init_routes.dtype)  # Shape: (2, 5)
         # padded_routes[:,0] =  init_routes # init_routes.shape(batch,problem)
         # init_routes = init_routes.expand(-1, self.pomo_size, -1)
         # self.step_state.current_routes = init_routes
-        self.step_state.cur_travel_time_routes, self.step_state.current_routes,  self.step_state.cur_demands, self.duration_mask = init_travel_time_demand(depot_xy, node_xy,node_demand, init_routes,self.route_limit, self.truck_num, self.speed)
+        self.step_state.cur_travel_time_routes, self.step_state.current_routes,  self.step_state.cur_demands, self.duration_mask = init_travel_time_demand(self.depot, self.node_xy,self.node_demand, self.init_routes,self.route_limit, self.truck_num, self.speed)
         self.step_state.cur_travel_time_routes = self.step_state.cur_travel_time_routes.unsqueeze(1).expand(-1, self.pomo_size, -1, -1)
         self.step_state.current_routes = self.step_state.current_routes.unsqueeze(1).expand(-1, self.pomo_size, -1, -1)
         self.step_state.cur_demands = self.step_state.cur_demands.unsqueeze(1).expand(-1, self.pomo_size, -1)
@@ -521,12 +514,12 @@ class VRPLTWEnv:
         # shape: (batch, pomo)
         self.current_route = None
         #shape: (batch, pomo)
-        self.selected_node_list = torch.zeros((self.batch_size, self.pomo_size, 0), dtype=torch.long).to(self.device)
+        # self.selected_node_list = torch.zeros((self.batch_size, self.pomo_size, 0), dtype=torch.long).to(self.device)
         # shape: (batch, pomo, 0~)
 
-        self.at_the_depot = torch.ones(size=(self.batch_size, self.pomo_size), dtype=torch.bool).to(self.device)
+        # self.at_the_depot = torch.ones(size=(self.batch_size, self.pomo_size), dtype=torch.bool).to(self.device)
         # shape: (batch, pomo)
-        self.load = torch.ones(size=(self.batch_size, self.pomo_size, self.problem_size)).to(self.device)
+        # self.load = torch.ones(size=(self.batch_size, self.pomo_size, self.problem_size)).to(self.device)
         # shape: (batch, pomo)
         # self.visited_ninf_flag = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size, self.problem_size)).to(self.device)
        
@@ -540,26 +533,24 @@ class VRPLTWEnv:
         self.init_mask[mask_node] = 1
         self.ninf_mask = self.init_mask.clone()
         self.ninf_mask = torch.where(self.ninf_mask == 1, 1, self.duration_mask.unsqueeze(1).expand(self.batch_size, self.pomo_size, -1, -1))
-        # shape: (batch, pomo, problem+1)
-        self.finished = torch.zeros(size=(self.batch_size, self.pomo_size), dtype=torch.bool).to(self.device)
-        # shape: (batch, pomo)
-        self.current_time = torch.zeros(size=(self.batch_size, self.pomo_size)).to(self.device)
-        # shape: (batch, pomo)
-        self.length = torch.zeros(size=(self.batch_size, self.pomo_size)).to(self.device)
-        # shape: (batch, pomo)
-        self.current_coord = self.depot_node_xy[:, :1, :]  # depot
-        # shape: (batch, pomo, 2)
+        # # shape: (batch, pomo, problem+1)
+        # self.finished = torch.zeros(size=(self.batch_size, self.pomo_size), dtype=torch.bool).to(self.device)
+        # # shape: (batch, pomo)
+        # self.current_time = torch.zeros(size=(self.batch_size, self.pomo_size)).to(self.device)
+        # # shape: (batch, pomo)
+        # self.length = torch.zeros(size=(self.batch_size, self.pomo_size)).to(self.device)
+        # # shape: (batch, pomo)
+        # self.current_coord = self.depot_node_xy[:, :1, :]  # depot
+        # # shape: (batch, pomo, 2)
 
         reward = None
         done = False
         return self.reset_state, reward, done
 
     def pre_step(self):
-        self.step_state.selected_count = self.selected_count
-        self.step_state.load = self.load
         self.step_state.current_node = self.current_node
         self.step_state.ninf_mask = self.ninf_mask
-        self.step_state.mask = torch.where(torch.sum(self.ninf_mask, dim = -1) == self.problem_size, float('-inf'), 0)
+        self.step_state.mask = torch.where(torch.sum(self.ninf_mask, dim = -1) == self.problem_size, float('-inf'), 0).to(self.device)
 
         # self.step_state.finished = self.finished
         # self.step_state.current_time = self.current_time
