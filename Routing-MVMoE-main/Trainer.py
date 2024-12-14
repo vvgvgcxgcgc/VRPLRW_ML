@@ -163,7 +163,10 @@ class Trainer:
     def _val_one_batch(self, data, env, aug_factor=1, eval_type="argmax"):
         self.model.eval()
         self.model.set_eval_type(eval_type)
-        batch_size = data.size(0) if isinstance(data, torch.Tensor) else data[-1].size(0)
+        train_data, num = data
+        pomo_cost = train_data[-1]
+        n = env.problem_size
+        batch_size = train_data[0].size(0)
         with torch.no_grad():
             env.load_problems(batch_size, problems=data, aug_factor=aug_factor)
             reset_state, _, _ = env.reset()
@@ -175,12 +178,10 @@ class Trainer:
                 state, reward, done = env.step(selected)
 
         # Return
-        aug_reward = reward.reshape(aug_factor, batch_size, env.pomo_size)
+        aug_reward = reward.squeeze(1)
         # shape: (augmentation, batch, pomo)
-        max_pomo_reward, _ = aug_reward.max(dim=2)  # get best results from pomo
-        no_aug_score = -max_pomo_reward[0, :].float()  # negative sign to make positive value
-        max_aug_pomo_reward, _ = max_pomo_reward.max(dim=0)  # get best results from augmentation
-        aug_score = -max_aug_pomo_reward.float()  # negative sign to make positive value
+        aug_score = -aug_reward.float()  # negative sign to make positive value
+        no_aug_score = pomo_cost  # negative sign to make positive value
 
         return no_aug_score, aug_score
 
