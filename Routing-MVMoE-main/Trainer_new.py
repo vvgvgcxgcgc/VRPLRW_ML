@@ -1,7 +1,7 @@
 import re
 from torch.optim import Adam as Optimizer
 from torch.optim.lr_scheduler import MultiStepLR as Scheduler
-
+import torch
 from utils import *
 
 
@@ -66,7 +66,7 @@ class Trainer:
                 val_envs = [get_env(prob)[0] for prob in val_problems]
                 for i, path in enumerate(paths):
                     # if no optimal solution provided, set compute_gap to False
-                    score, gap = self._val_and_stat(dir[i], path, val_envs[i](**{"problem_size": problem_size, "pomo_size": problem_size}), batch_size=100, val_episodes=val_episodes, compute_gap=True)
+                    score, gap = self._val_and_stat(dir[i], path, val_envs[i](**{"problem_size": problem_size, "pomo_size": problem_size}), batch_size=500, val_episodes=val_episodes, compute_gap=True)
                     self.result_log["val_score"].append(score)
                     self.result_log["val_gap"].append(gap)
 
@@ -99,32 +99,33 @@ class Trainer:
         score_AM, loss_AM = AverageMeter(), AverageMeter()
         train_num_episode = self.trainer_params['train_episodes']
 
+        batch_idx = 0
         while episode < train_num_episode:
             remaining = train_num_episode - episode
             batch_size = min(self.trainer_params['train_batch_size'], remaining)
 
             env = random.sample(self.envs, 1)[0](**self.env_params)
 
-            data = env.get_random_problems(mode, batch_size)
+            data = env.get_random_problems(mode, batch_size, batch_idx, self.env_params["problem_size"])
             
-            avg_score, avg_loss = self._train_one_batch(data, env)
+            avg_score, avg_loss = self._train_one_batch(mode, batch_size, batch_idx, data, env)
 
             score_AM.update(avg_score, batch_size)
             loss_AM.update(avg_loss, batch_size)
             episode += batch_size
+            batch_idx += 1
 
         # Log Once, for each epoch
         print('Epoch {:3d}: Train ({:3.0f}%)  Score: {:.4f},  Loss: {:.4f}'.format(epoch, 100. * episode / train_num_episode, score_AM.avg, loss_AM.avg))
 
         return score_AM.avg, loss_AM.avg
 
-    def _train_one_batch(self, data, env):
+    def _train_one_batch(self, batch_size, data, env):
         self.model.train()
         self.model.set_eval_type(self.model_params["eval_type"])
-        train_data, num = data
-        pomo_cost = train_data[-1]
-        n = env.problem_size
-        batch_size = train_data[0].size(0)
+        # print(data[0])
+        # assert False
+        # batch_size = data.size(0) if isinstance(data, torch.Tensor) else data[-1].size(0)
         env.load_problems(batch_size, problems=data, aug_factor=1)
         reset_state, _, _ = env.reset()
         self.model.pre_forward(reset_state)
@@ -133,23 +134,19 @@ class Trainer:
 
         # POMO Rollout
         state, reward, done = env.pre_step()
-        finis = 0
         # print("{}\n".format(state.PROBLEM))
-        while (finis < n - num):
+        while not done:
             selected, prob = self.model(state)
             # shape: (batch, pomo)
-            if(finis == n -num - 1): env.step_state.done = True
             state, reward, done = env.step(selected)
             prob_list = torch.cat((prob_list, prob[:, :, None]), dim=2)
-            finis  = finis + 1
 
         # Loss
-        advantage = reward.squeeze(1) + pomo_cost  # (batch, pomo)
-        prob_list = prob_list.squeeze(1)
-        log_prob = prob_list.log().sum(dim=1)
+        advantage = reward - reward.float().mean(dim=1, keepdims=True)  # (batch, pomo)
+        log_prob = prob_list.log().sum(dim=2)
         loss = -advantage * log_prob  # Minus Sign: To Increase REWARD
         loss_mean = loss.mean()
-        max_pomo_reward= reward # get best results from pomo
+        max_pomo_reward, _ = reward.max(dim=1)  # get best results from pomo
         score_mean = -max_pomo_reward.float().mean()  # negative sign to make positive value
 
         if hasattr(self.model, "aux_loss"):
@@ -162,59 +159,59 @@ class Trainer:
 
         return score_mean.item(), loss_mean.item()
 
-    def _val_one_batch(self, data, env, aug_factor=1, eval_type="argmax"):
+    def _val_one_batch(self, mode, batch_size, batch_idx, data, env, aug_factor=1, eval_type="argmax"):
         self.model.eval()
         self.model.set_eval_type(eval_type)
-        train_data, num = data
-        pomo_cost = train_data[-1]
-        n = env.problem_size
-        batch_size = train_data[0].size(0)
-        finis = 0
-
+        # batch_size = data.size(0) if isinstance(data, torch.Tensor) else data[-1].size(0)
         with torch.no_grad():
-            env.load_problems(batch_size, problems=data, aug_factor=aug_factor)
+            env.load_problems(mode, batch_size, batch_idx, problems=data, aug_factor=aug_factor)
             reset_state, _, _ = env.reset()
             self.model.pre_forward(reset_state)
             state, reward, done = env.pre_step()
-            while (finis < n - num):
+            while not done:
                 selected, _ = self.model(state)
                 # shape: (batch, pomo)
-                if(finis == n -num - 1): env.step_state.done = True
                 state, reward, done = env.step(selected)
-                finis = finis + 1
 
         # Return
-        aug_reward = reward.squeeze(1)
+        aug_reward = reward.reshape(aug_factor, batch_size, env.pomo_size)
         # shape: (augmentation, batch, pomo)
-        aug_score = -aug_reward.float()  # negative sign to make positive value
-        no_aug_score = pomo_cost  # negative sign to make positive value
+        max_pomo_reward, _ = aug_reward.max(dim=2)  # get best results from pomo
+        no_aug_score = -max_pomo_reward[0, :].float()  # negative sign to make positive value
+        max_aug_pomo_reward, _ = max_pomo_reward.max(dim=0)  # get best results from augmentation
+        aug_score = -max_aug_pomo_reward.float()  # negative sign to make positive value
 
         return no_aug_score, aug_score
 
     def _val_and_stat(self, dir, val_path, env, batch_size=500, val_episodes=1000, compute_gap=False):
-        no_aug_score_list, aug_score_list, gap_list = [], [], []
+        no_aug_score_list, aug_score_list, no_aug_gap_list, aug_gap_list = [], [], [], []
         episode, no_aug_score, aug_score = 0, torch.zeros(0).to(self.device), torch.zeros(0).to(self.device)
 
+        mode = "val"
+        batch_idx = 0
         while episode < val_episodes:
             remaining = val_episodes - episode
             bs = min(batch_size, remaining)
-
-            data = env.get_random_problems("val", bs)
-
-            no_aug, aug = self._val_one_batch(data, env, aug_factor=8, eval_type="argmax")
+            # data = env.load_dataset(os.path.join(dir, val_path), offset=episode, num_samples=bs)
+            data = env.get_random_problems(mode, bs, batch_idx, self.env_params["problem_size"])
+            no_aug, aug = self._val_one_batch(mode, bs, batch_idx, data, env, aug_factor=8, eval_type="argmax")
             no_aug_score = torch.cat((no_aug_score, no_aug), dim=0)
             aug_score = torch.cat((aug_score, aug), dim=0)
             episode += bs
+            batch_idx += 1
 
         no_aug_score_list.append(round(no_aug_score.mean().item(), 4))
         aug_score_list.append(round(aug_score.mean().item(), 4))
 
         if compute_gap:
-            gap = [(no_aug_score[j].item() - aug_score[j].item()) / aug_score[j].item() * 100 for j in range(val_episodes)]
-            gap_list.append(round(sum(gap) / len(gap), 4))
-
-            print(">> Val Score on {}: NO_AUG_Score: {}, NO_AUG_Gap: {}% --> AUG_Score: {}%".format(val_path, no_aug_score_list, gap_list, aug_score_list))
-            return aug_score_list[0], gap_list[0]
+            opt_sol = load_dataset(get_opt_sol_path(dir, env.problem, data[1].size(1)), disable_print=True)[: val_episodes]
+            opt_sol = [i[0] for i in opt_sol]
+            gap = [(no_aug_score[j].item() - opt_sol[j]) / opt_sol[j] * 100 for j in range(val_episodes)]
+            no_aug_gap_list.append(round(sum(gap) / len(gap), 4))
+            gap = [(aug_score[j].item() - opt_sol[j]) / opt_sol[j] * 100 for j in range(val_episodes)]
+            aug_gap_list.append(round(sum(gap) / len(gap), 4))
+            print(">> Val Score on {}: NO_AUG_Score: {}, NO_AUG_Gap: {}% --> AUG_Score: {}, AUG_Gap: {}%".format(val_path, no_aug_score_list, no_aug_gap_list, aug_score_list, aug_gap_list))
+            return aug_score_list[0], aug_gap_list[0]
         else:
             print(">> Val Score on {}: NO_AUG_Score: {}, --> AUG_Score: {}".format(val_path, no_aug_score_list, aug_score_list))
             return aug_score_list[0], 0

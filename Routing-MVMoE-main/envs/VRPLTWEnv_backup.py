@@ -2,20 +2,11 @@ from dataclasses import dataclass
 import torch
 import os, pickle
 import numpy as np
-from gen_pop_greedy_VRPL import nearest_neighbor, Customer_Tu, Route_Tu
+import random
+import json
 
 __all__ = ['VRPLTWEnv']
 
-def calculate_cost_matrix(points):
-    num_points, _ = points.shape[:2]
-    cost_matrix = torch.zeros((num_points, num_points))
-
-    for i in range(num_points):
-        for j in range(num_points):
-            if i != j:
-                cost_matrix[i, j] = torch.norm(points[i] - points[j])
-    
-    return cost_matrix
 
 @dataclass
 class Reset_State:
@@ -70,30 +61,57 @@ class Step_State:
     truck_num: torch.Tensor = None
     total_time: torch.Tensor = None
     cur_index: torch.Tensor = None
+    mask: torch.Tensor = None
+    done = False
 
 
 
 
     max_route: int = 0
 
-def update_duration_mask(cur_mask, cur_routes, routes_cost, service_time,  max_duration, truck_num, selected_route, cur_index, node_xy, depot, speed = 1.0):
-    batch, pomo = cur_index.shape()
-    BATCH_IDX = torch.arange(batch)[:, None].expand(batch, pomo)
-    POMO_IDX = torch.arange(pomo)[None, :].expand(batch, pomo)
-    selected_route_cost = torch.gather(routes_cost, 2, selected_route.unsqueeze(-1).unsqueeze(-1)).squeeze(2)
-    nodes_route = torch.gather(cur_routes, 2, selected_route.unsqueeze(-1).unsqueeze(-1)).squeeze(2)
-    nodes_num = torch.gather(cur_routes, 2, selected_route.unsqueeze(-1)).squeeze(2)
+def update_duration_mask(cur_mask, cur_routes, routes_cost, service_time,   max_duration, truck_num, selected_route, node_xy, depot, speed = 1.0):
+    batch, pomo, n, _ = cur_routes.shape
+    
+    BATCH_IDX = torch.arange(batch)[:, None, None].expand(batch, pomo, n)
+    POMO_IDX = torch.arange(pomo)[None, :, None].expand(batch, pomo, n)
+    ROUTE_IDX =  torch.arange(pomo)[None, None, :].expand(batch, pomo, n)
+
+    selected_route_cost = torch.gather(routes_cost, 2, selected_route.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, n + 1)).squeeze(2)
+    nodes_route = torch.gather(cur_routes, 2, selected_route.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, n)).squeeze(2)
+    selected_route_service_time = torch.gather(service_time.unsqueeze(1).expand(-1, pomo, -1), 2, nodes_route) # shape (batch, pomo, n)
+
+    nodes_num = torch.gather(truck_num, 2, selected_route.unsqueeze(-1)).expand(batch, pomo, n)
     total_cost = torch.sum(selected_route_cost, dim = 2)
-    suspect_pos = torch.concat((nodes_route[BATCH_IDX, POMO_IDX,cur_index].unsqueeze(-1), nodes_route[BATCH_IDX, POMO_IDX,cur_index -1].unsqueeze(-1), nodes_route[BATCH_IDX, POMO_IDX,cur_index -1].unsqueeze(-1)), 2)
+    # suspect_pos = torch.concat((nodes_route[BATCH_IDX, POMO_IDX,cur_index].unsqueeze(-1), nodes_route[BATCH_IDX, POMO_IDX,cur_index -1].unsqueeze(-1), nodes_route[BATCH_IDX, POMO_IDX,cur_index -1].unsqueeze(-1)), 2)
     node_xy_expand = node_xy.unqueeze(1).expand(-1, pomo, -1, -1)
-    nodes_route_coords = torch.gather(node_xy_expand, 2, suspect_pos.unsqueeze(-1).expand(-1, -1, -1, 2)) #shape (batch, pomo, 3, 2)
-    truck_num = truck_num - 1
-    nodes_route_coords[:, :, 2, :] = torch.where(cur_index.unsqueeze(-1).expand(-1, -1, 2) < truck_num, nodes_route_coords[:, :, 2, :], depot.unsqueeze(1).expand(-1, pomo, -1))
-    distances= torch.sqrt(torch.sum((nodes_route_coords.unsqueeze(3) - node_xy_expand.unsqueeze(2)) ** 2, dim=-1))/speed
-    check = (distances[:, :, :, 0] + distances[:, :, :, 1] + service_time.unsqueeze(1).expand(-1, pomo, -1) - selected_route_cost[BATCH_IDX, POMO_IDX,cur_index].unsqueeze(-1) +total_cost.unsqueeze(-1)) > max_duration.unsqeeze(-1).unsqueeze(-1)
-    check += (distances[:, :, :, 1] + distances[:, :, :, 2] + service_time.unsqueeze(1).expand(-1, pomo, -1) - selected_route_cost[BATCH_IDX, POMO_IDX,cur_index].unsqueeze(-1) +total_cost.unsqueeze(-1)) > max_duration.unsqeeze(-1).unsqueeze(-1)
-    check = check <  2
-    cur_mask[BATCH_IDX, POMO_IDX, :,  selected_route] = torch.where(cur_mask[BATCH_IDX, POMO_IDX, :,  selected_route] == 1, check, 0)
+    nodes_route_coords = torch.gather(node_xy_expand, 2, nodes_route.unsqueeze(-1).expand(-1, -1, -1, 2)) #shape (batch, pomo, 3, 2)
+    nodes_num = nodes_num - 1
+    # nodes_route_coords[:, :, 2, :] = torch.where(cur_index.unsqueeze(-1).expand(-1, -1, 2) < nodes_num.unsqueeze(-1).expand(-1, -1, 2), nodes_route_coords[:, :, 2, :], depot.unsqueeze(1).expand(-1, pomo, -1))
+    distances= torch.sqrt(torch.sum((nodes_route_coords.unsqueeze(2) - node_xy_expand.unsqueeze(3)) ** 2, dim=-1))/speed  # shape (batch, pomo, n, n)
+    xy_depot = torch.sqrt(torch.sum((depot.unsqueeze(1).unsqueeze(2).unsqueeze(2).expand(-1, pomo, 1,1, -1) - node_xy_expand.unsqueeze(3)) ** 2, dim = -1))/ speed #shape(batch, pomo, n, 1)
+    range_tensor = torch.arange(n).unsqueeze(0).unsqueeze(0).unsqueeze(0)# Shape: (1, 1, 1, n)
+
+    padding = range_tensor > nodes_num.unsqueeze(-1)
+    padding = padding*10 #shape (batch, pomo, n, n)
+    distances = distances + padding
+    new_distances = distances.clone()
+    new_distances = torch.concat((xy_depot, new_distances), dim = 3) # shape (batch, pomo, n, n+1)
+    distances[BATCH_IDX, POMO_IDX,ROUTE_IDX, nodes_num + 1] = xy_depot.squeeze(-1)
+    selected_route_service_time = selected_route_service_time.unsqueeze(2).expand(-1, -1, n, -1)
+    zero = torch.zeros((batch, pomo, n))
+
+    selected_route_service_time[BATCH_IDX, POMO_IDX,ROUTE_IDX, nodes_num + 1] = zero
+    xy_depot = xy_depot*500
+
+    selected_route_service_time = torch.concat((selected_route_service_time,xy_depot ), dim = 3) # shape (batch, pomo, n, n + 1)
+
+    distances = torch.concat((distances,xy_depot ), dim = 3) # shape (batch, pomo, n + 1)
+    cost = distances + new_distances - selected_route_cost.unsqueeze(2) + selected_route_service_time + service_time.unsqueeze(1).unsqueeze(-1).expand(batch, pomo, n, 1) + total_cost.unsqueeze(-1).unsqueeze(-1) <= max_duration.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+    mask = torch.sum(cost, dim = -1) == 0 # shape(batch, pomo, n)
+    mask = mask.to(torch.int64)
+
+
+    cur_mask[BATCH_IDX.squeeze(-1), POMO_IDX.squeeze(-1), :,  selected_route] = torch.where(cur_mask[BATCH_IDX.squeeze(-1), POMO_IDX.squeeze(-1), :,  selected_route] == 0, mask, 1)
 
     return cur_mask
 
@@ -114,7 +132,7 @@ def update_demand_mask(cur_demands, node_demand, cur_mask, max_demand, selected_
     node_demand = node_demand.unsqueeze(1).expand(-1, pomo, n)
     round_error_epsilon = 0.00001
     max_demand = max_demand.unsqueeze(-1).unsqueeze(-1)
-    demand_mask = selected_route_demand + node_demand + round_error_epsilon > max_demand #shape(batch, pomo, n)
+    demand_mask = selected_route_demand + node_demand   > max_demand #shape(batch, pomo, n)
     cur_mask[BATCH_IDX, POMO_IDX, :,  selected_route] = torch.where(cur_mask[BATCH_IDX, POMO_IDX, :,  selected_route] == 0, demand_mask, 1)
     return cur_mask
 
@@ -126,34 +144,37 @@ def update_route(node_xy, depot,node_demand,service_time, cur_demands, truck_num
     depot: Tensor shape (batch, 2)     contains coord of depot point
     truck_num: Tensor shape (batch, pomo, n) contains  number of customer in route, maximize n route, if just use m < n route, padding 0
     cur_routes: Tensor shape (batch, pomo, n, n) each routes contains index of customer, padding 0
-    routes_cost: Tensor shape (batch, pomo, n, n + 1) cost of from right previous of each customer, add value from last node to depot, padding 0
+    routes_cost: Tensor shape (batch, pomo, n, n + 1) cost of from right previous of each customer và cộng thêm servicetime, add value from last node to depot, padding 0
     selected_node: Tensor shape(batch, pomo) contains customer index chosen by model
-    selected_route: Tensor shape(batch, pomo) contain route index chosen by model
+    # selected_route: Tensor shape(batch, pomo) contain route index chosen by model
     Return:
         new_routes // same as cur_routes, but is inserted selected customer into selected route
         shape(batch, pomo, n, n)
         new_routes_cost shape(batch, pomo, n, n + 1)
-
+        truck_num
+        cur_demands
+        insert_index
+        selected_route_index
     '''
-    batch, pomo, _, n = cur_routes.shape()
+    batch, pomo, _, n = cur_routes.shape
     BATCH_IDX = torch.arange(batch)[:, None, None].expand(batch, pomo, n)
     POMO_IDX = torch.arange(pomo)[None, :, None].expand(batch, pomo, n)
     ROUTE_IDX =  torch.arange(pomo)[None, None, :].expand(batch, pomo, n)
     # raw_selected_route = selected_route.clone()
-    selected_route = selected_route.unsqueeze(-1)
-    node_num = torch.gather(truck_num, 2, selected_route) # shape (batch, pomo, 1)
+    # selected_route = selected_route.unsqueeze(-1)
+    # node_num = torch.gather(truck_num, 2, selected_route) # shape (batch, pomo, 1)
     # node_num = node_num -1
-    node_num = truck_num - 1 # shape (batch, pomo, n)
+    node_num = torch.where(truck_num - 1 < 0, 0, truck_num - 1)
     # selected_route_expand = selected_route.unsqueeze(-1).expand(-1, -1, 1, n)
     # nodes_route = torch.gather(cur_routes, 2, selected_route_expand).squeeze(2)
-    nodes_route = cur_routes # shape (batch, pomo, n, n)
+    nodes_route = cur_routes.clone() # shape (batch, pomo, n, n)
 
-    node_xy_expand = node_xy.unqueeze(1).unsqueeze(2).expand(-1, pomo,n, -1, -1)
+    node_xy_expand = node_xy.unsqueeze(1).expand(-1, pomo, -1, -1)
     raw_selected_node = selected_node.clone()
     selected_node = selected_node.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 2)
     selected_node_coord = torch.gather(node_xy_expand, 2, selected_node).unsqueeze(2).expand(-1, -1, n, -1, -1) # shape( batch, pomo, 1, 2)
     nodes_route_expand = nodes_route.unsqueeze(-1).expand(-1,-1,-1, -1, 2) #shape (batch, pomo, n, n, 2 )
-    nodes_route_coords = torch.gather(node_xy_expand, 3, nodes_route_expand) #shape (batch, pomo, n, n, 2)
+    nodes_route_coords = torch.gather(node_xy_expand.unsqueeze(2).expand(-1, -1, n, -1, -1), 3, nodes_route_expand) #shape (batch, pomo, n, n, 2)
     node_num_expand = node_num.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1,1, 2) # shape(batch, pomo, 1, 2)
     last_node_coord = torch.gather(nodes_route_coords, 3, node_num_expand) #shape(batch, pomo,n,1, 2)
     depot_expand = depot.unsqueeze(1).unsqueeze(1).unsqueeze(1).expand(-1, pomo, n, 1, -1) #shape(batch, pomo,n,1, 2)
@@ -173,7 +194,7 @@ def update_route(node_xy, depot,node_demand,service_time, cur_demands, truck_num
     new_distances = distances.clone()
     new_distances = torch.concat((distance_selected_depot, new_distances), dim = 3) # shape (batch, pomo, n, n+1)
     node_num = node_num + 1
-    distances[BATCH_IDX, POMO_IDX,ROUTE_IDX, node_num] = distance_lastnode_depot
+    distances[BATCH_IDX, POMO_IDX,ROUTE_IDX, node_num] = distance_lastnode_depot.squeeze(-1)
     distance_lastnode_depot = distance_lastnode_depot*10
     distances = torch.concat((distances,distance_lastnode_depot ), dim = 3) # shape (batch, pomo, n + 1)
     # lost_index = raw_selected_route.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, n + 1)
@@ -189,7 +210,7 @@ def update_route(node_xy, depot,node_demand,service_time, cur_demands, truck_num
     lost_distance = torch.gather(routes_cost, 2, selected_route_index.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, n + 1)).squeeze(2)
     selected_dis = torch.gather(distances, 2, selected_route_index.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, n + 1)).squeeze(2)
     selected_new_dis = torch.gather(new_distances, 2, selected_route_index.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, n + 1)).squeeze(2)
-    new_nodes_route = torch.zeros((batch,pomo, n + 1))
+    new_nodes_route = torch.zeros((batch,pomo, n + 1),  dtype=torch.int64)
     expanded_indices = torch.arange(n + 1).expand(batch,pomo, -1)  # Shape: (batch, n + 1)
     mask_before = expanded_indices < insert_index.unsqueeze(1)  # Shape: (batch, n+1)
     mask_after = expanded_indices > insert_index.unsqueeze(1)
@@ -218,7 +239,7 @@ def update_route(node_xy, depot,node_demand,service_time, cur_demands, truck_num
 
 
 
-def init_travel_time_demand(depot_xy, node_xy, node_demand, service_time,  node_indices, truck_num, speed=1.0):
+def init_travel_time_demand( depot, node_xy, node_demand, service_time,  node_indices, max_duration, truck_num, speed=1.0):
     """
     Computes the travel time from the depot to a set of nodes identified by indices.
 
@@ -240,7 +261,7 @@ def init_travel_time_demand(depot_xy, node_xy, node_demand, service_time,  node_
     selected_node_xy = torch.gather(node_xy, 1, node_indices.unsqueeze(-1).expand(-1, -1, 2))  # Shape: (batch, m, 2)
     selected_service_time= torch.gather(service_time, 1, node_indices )
     # Compute the difference in coordinates
-    delta = selected_node_xy - depot_xy  # Shape: (batch, m, 2)
+    delta = selected_node_xy - depot  # Shape: (batch, m, 2)
 
     # Compute Euclidean distances
     distances = torch.sqrt(torch.sum(delta ** 2, dim=-1))  # Shape: (batch, m)
@@ -261,11 +282,21 @@ def init_travel_time_demand(depot_xy, node_xy, node_demand, service_time,  node_
     travel_matrix[:, :m, 0] = travel_times + selected_service_time
     travel_matrix[:, :m, 1] = travel_times
 
+
+    distances= torch.sqrt(torch.sum((selected_node_xy.unsqueeze(1) - node_xy.unsqueeze(2)) ** 2, dim=-1)).unsqueeze(-1)/speed  # shape (batch, n, n, 1)
+    xy_depot = torch.sqrt(torch.sum((depot.unqueeze(1).unsqueeze(1) - node_xy.unsqueeze(2)) ** 2, dim = -1)).unsqueeze(2).expand(-1, -1, n, 1)/ speed #shape(batch, n,n, 1)
+
+    distances = distances + xy_depot  + service_time.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, n, 1) + selected_service_time.unsqueeze(1).unsqueeze(-1).expand(-1, n, n, 1)
+
+    cost =  distances > max_duration.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+
+
+
     routes_matrix = torch.zeros((batch, n, n ), device=travel_times.device)
     routes_matrix[:, :m, 0] = node_indices
 
    
-    return travel_matrix, routes_matrix, routes_demand
+    return travel_matrix, routes_matrix, routes_demand, cost.squeeze(-1)
 def calculate_tw_demand_index(tw_start, tw_end,demands,  node_indices, truck_num,  pomo = 1):
     '''
     Calculate the time windows for current routes
@@ -352,8 +383,13 @@ class VRPLTWEnv:
         self.loc_scaler = env_params['loc_scaler'] if 'loc_scaler' in env_params.keys() else None
         self.device = torch.device('cuda', torch.cuda.current_device()) if 'device' not in env_params.keys() else env_params['device']
 
-        self.pkl_path = "VRPLRW_ML/Routing-MVMoE-main/gen_data/data50_50k.pkl"
-        self.dataset = None
+        self.train_pkl_path = "gen_data/new/data50_ntruck_10k.pkl"
+        self.val_pkl_path = "gen_data/new/data50_ntruck_2k.pkl"
+
+        self.train_dataset = None
+        self.train_ntruck_category = None
+        self.val_dataset = None
+        self.val_ntruck_category = None
 
         # Const @Load_Problem
         ####################################
@@ -411,11 +447,10 @@ class VRPLTWEnv:
         self.reset_state = Reset_State()
         self.step_state = Step_State()
 
-    def load_problems(self, batch_size, batch_idx, problems=None, aug_factor=1):
+    def load_problems(self, batch_size, problems=None, aug_factor=1):
         if problems is not None:
             depot_xy, node_xy, node_demand, route_limit, service_time, tw_start, tw_end, init_routes, mask_node, truck_num, max_demand = problems
-        else:
-            depot_xy, node_xy, node_demand, route_limit, service_time, tw_start, tw_end, init_routes, mask_node, truck_num, max_demand = self.get_random_problems(batch_size, self.problem_size, batch_idx, normalized=True)
+
         self.batch_size = depot_xy.size(0)
         self.num_problem = depot_xy.size(1)
         route_limit = route_limit[:, None] if route_limit.dim() == 1 else route_limit
@@ -471,21 +506,14 @@ class VRPLTWEnv:
 
         self.step_state.BATCH_IDX = self.BATCH_IDX
         self.step_state.POMO_IDX = self.POMO_IDX
-        # self.step_state.open = torch.zeros(self.batch_size, self.pomo_size).to(self.device)
-        # self.step_state.START_NODE = torch.arange(start=1, end=self.pomo_size + 1)[None, :].expand(self.batch_size, -1).to(self.device)
+
         self.step_state.PROBLEM = self.problem
         self.step_state.truck_num = self.truck_num.unsqueeze(1).expand(self.batch_size, self.pomo_size,-1)
-        
-        # padded_routes = torch.full((self.batch_size, self.problem_size), self.problem_size, dtype=init_routes.dtype)  # Shape: (2, 5)
-        # padded_routes[:,0] =  init_routes # init_routes.shape(batch,problem)
-        # init_routes = init_routes.expand(-1, self.pomo_size, -1)
-        # self.step_state.current_routes = init_routes
+
         self.step_state.cur_travel_time_routes, self.step_state.current_routes,  self.step_state.cur_demands = init_travel_time_demand(depot_xy, node_xy,node_demand, init_routes, self.truck_num, self.speed)
         self.step_state.cur_travel_time_routes = self.step_state.cur_travel_time_routes.unsqueeze(1).expand(-1, self.pomo_size, -1, -1)
         self.step_state.current_routes = self.step_state.current_routes.unsqueeze(1).expand(-1, self.pomo_size, -1, -1)
         self.step_state.cur_demands = self.step_state.cur_demands.unsqueeze(1).expand(-1, self.pomo_size, -1)
-        # self.step_state.cur_demands = torch.where(init_routes == self.problem_size, torch.tensor(0, dtype=torch.int32), node_demand)
-        # self.step_state.current_routes, self.step_state.cur_demands, self.step_state.tw_start_routes, self.step_state.tw_end_routes = calculate_tw_demand_index(tw_start, tw_end, node_demand, init_routes, self.truck_num, self.pomo_size)
 
 
 
@@ -506,12 +534,14 @@ class VRPLTWEnv:
        
 
         # shape: (batch, pomo, problem+1)
-        self.ninf_mask = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size,self.problem_size )).to(self.device)
+        self.init_mask = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size,self.problem_size )).to(self.device)
         zero_mask = (self.step_state.truck_num == 0)  # Shape: (batch, pomo, m)
         zero_mask = zero_mask.unsqueeze(2).expand(self.batch_size, self.pomo_size, self.problem_size, -1)
-        self.ninf_mask[zero_mask] = 1
-        mask_node = mask_node.unsqueeze(1).unsqueeze(-1).expand(-1, self.pomo_size, self.problem_size, self.problem_size)
-        self.ninf_mask[mask_node] = 1
+        self.init_mask[zero_mask] = 1
+        mask_node = self.mask_node.unsqueeze(1).unsqueeze(-1).expand(-1, self.pomo_size, self.problem_size, self.problem_size)
+        self.init_mask[mask_node] = 1
+        self.ninf_mask = self.init_mask.clone()
+        self.ninf_mask = torch.where(self.ninf_mask == 1, 1, self.duration_mask.unsqueeze(1).expand(self.batch_size, self.pomo_size, -1, -1))
         # shape: (batch, pomo, problem+1)
         self.finished = torch.zeros(size=(self.batch_size, self.pomo_size), dtype=torch.bool).to(self.device)
         # shape: (batch, pomo)
@@ -531,6 +561,8 @@ class VRPLTWEnv:
         self.step_state.load = self.load
         self.step_state.current_node = self.current_node
         self.step_state.ninf_mask = self.ninf_mask
+        self.step_state.mask = torch.where(torch.sum(self.ninf_mask, dim = -1) == self.problem_size, float('-inf'), 0)
+
         # self.step_state.finished = self.finished
         # self.step_state.current_time = self.current_time
         # self.step_state.length = self.length
@@ -548,56 +580,27 @@ class VRPLTWEnv:
         self.selected_count += 1
         self.current_node = selected #shape (batch, pomo)
         # self.current_route = s #shape(batch, pomo)
-        self.node_mask = torch.gather(self.ninf_mask, 2,self.current_node.unsqueeze(-1).unsqueeze(-1).expand(-1,-1, 1, self.problem_size)).squeeze(2)
+        self.node_mask = torch.gather(self.step_state.ninf_mask, 2,self.current_node.unsqueeze(-1).unsqueeze(-1).expand(-1,-1, 1, self.problem_size)).squeeze(2)
         self.step_state.current_routes, self.step_state.cur_travel_time_routes, self.step_state.truck_num, self.step_state.cur_demands, self.step_state.cur_index, self.current_route  = update_route(self.node_xy, self.depot, self.node_demand,self.service_time, self.step_state.cur_demands, self.step_state.truck_num,self.step_state.current_routes, self.step_state.cur_travel_time_routes, self.current_node,self.node_mask, self.speed)
 
 
 
-        # demand_list = self.depot_node_demand[:, None, :].expand(self.batch_size, self.pomo_size, -1)
-        # # shape: (batch, pomo, problem+1)
-        # gathering_index = selected[:, :, None]
-        # # shape: (batch, pomo, 1)
-        # selected_demand = demand_list.gather(dim=2, index=gathering_index).squeeze(dim=2)
-        # # shape: (batch, pomo)
-        # self.load -= selected_demand
-        # # shape: (batch, pomo)
-        # self.selected_node_list = torch.cat((self.selected_node_list, self.current_node[:, :, None]), dim=2)
-        # # shape: (batch, pomo, 0~)
-
-        # # Dynamic-2
-        # ####################################
-        # self.at_the_depot = (selected == 0)
-
-        # demand_list = self.depot_node_demand[:, None, :].expand(self.batch_size, self.pomo_size, -1)
-        # # shape: (batch, pomo, problem+1)
-        # gathering_index = selected[:, :, None]
-        # # shape: (batch, pomo, 1)
-        # selected_demand = demand_list.gather(dim=2, index=gathering_index).squeeze(dim=2)
-        # # shape: (batch, pomo)
-        # self.load -= selected_demand
-        # self.load[self.at_the_depot] = 1  # refill loaded at the depot
-
-        # current_coord = self.depot_node_xy[torch.arange(self.batch_size)[:, None], selected]
-        # # shape: (batch, pomo, 2)
-        # new_length = (current_coord - self.current_coord).norm(p=2, dim=-1)
-        # # shape: (batch, pomo)
-        # self.length = self.length + new_length
-        # self.length[self.at_the_depot] = 0  # reset the length of route at the depot
-        # self.current_coord = current_coord
 
         # Mask
-        self.ninf_mask[self.BATCH_IDX, self.POMO_IDX, self.current_node, :] = 1
+        self.step_state.ninf_mask[self.BATCH_IDX, self.POMO_IDX, :, self.current_route] = self.init_mask[self.BATCH_IDX, self.POMO_IDX, :, self.current_route]
+        self.step_state.ninf_mask[self.BATCH_IDX, self.POMO_IDX, self.current_node, :] = 1
+
        
-        self.ninf_mask = update_demand_mask(self.step_state.cur_demands, self.node_demand,self.ninf_mask, self.max_demand,self.current_route)
+        self.step_state.ninf_mask = update_demand_mask(self.step_state.cur_demands, self.node_demand, self.step_state.ninf_mask, self.max_demand,self.current_route)
 
         #route limit constraint
-        self.ninf_mask = update_duration_mask(self.ninf_mask, self.step_state.current_routes,self.step_state.cur_travel_time_routes,self.service_time, self.route_limit,self.step_state.truck_num,self.current_route,self.step_state.cur_index, self.node_xy,self.depot, self.speed)
-        self.mask = torch.sum(self.ninf_mask, dim = -1)
-        self.mask = torch.where(self.mask == self.pomo_size, float('-inf'), 0)
+        self.ninf_mask = update_duration_mask(self.step_state.ninf_mask, self.step_state.current_routes,self.step_state.cur_travel_time_routes,self.service_time, self.route_limit,self.step_state.truck_num,self.current_route, self.node_xy,self.depot, self.speed)
+        self.step_state.ninf_mask = torch.sum(self.ninf_mask, dim = -1)
+        self.mask = torch.where(self.mask == self.problem_size, float('-inf'), 0)
 
         self.step_state.selected_count = self.selected_count
 
-        self.step_state.ninf_mask = self.mask
+        self.step_state.mask = self.mask
 
         # returning values
         done = self.step_state.done
@@ -652,179 +655,77 @@ class VRPLTWEnv:
         data = (depot_xy, node_xy, node_demand, route_limit, service_time, tw_start, tw_end)
         return data
 
-    # def get_random_problems(self, batch_size, problem_size, normalized=True):
-    #     depot_xy = torch.rand(size=(batch_size, 1, 2))  # (batch, 1, 2)
-    #     node_xy = torch.rand(size=(batch_size, problem_size, 2))  # (batch, problem, 2)
+    def load_pkl_data(self):
+        # Load train data
+        with open(self.train_pkl_path, 'rb') as pkl_file:
+            train_data = pickle.load(pkl_file)
+        with open(self.train_pkl_path.replace(".pkl", ".json"), 'r') as meta_file:
+            self.train_ntruck_category = json.load(meta_file)
 
-    #     if problem_size == 20:
-    #         demand_scaler = 30
-    #     elif problem_size == 50:
-    #         demand_scaler = 40
-    #     elif problem_size == 100:
-    #         demand_scaler = 50
-    #     elif problem_size == 200:
-    #         demand_scaler = 70
-    #     else:
-    #         raise NotImplementedError
+        num_instances = len(train_data[0])
+        tw_start = torch.zeros(size=(num_instances, 1)).to(self.device)
+        tw_end = torch.zeros(size=(num_instances, 1)).to(self.device)
 
-    #     route_limit = torch.ones(batch_size) * 3.0
-
-    #     # time windows (vehicle speed = 1.):
-    #     #   1. The setting of "MTL for Routing Problem with Zero-Shot Generalization".
-    #     """
-    #     self.depot_start, self.depot_end = 0., 4.6.
-    #     a, b, c = 0.15, 0.18, 0.2
-    #     service_time = a + (b - a) * torch.rand(batch_size, problem_size)
-    #     tw_length = b + (c - b) * torch.rand(batch_size, problem_size)
-    #     c = (node_xy - depot_xy).norm(p=2, dim=-1)
-    #     h_max = (self.depot_end - service_time - tw_length) / c * self.speed - 1
-    #     tw_start = (1 + (h_max - 1) * torch.rand(batch_size, problem_size)) * c / self.speed
-    #     tw_end = tw_start + tw_length
-    #     """
-    #     #   2. See "Learning to Delegate for Large-scale Vehicle Routing" in NeurIPS 2021.
-    #     #   Note: this setting follows a similar procedure as in Solomon, and therefore is more realistic and harder.
-    #     service_time = torch.ones(batch_size, problem_size) * 0.2
-    #     travel_time = (node_xy - depot_xy).norm(p=2, dim=-1) / self.speed
-    #     a, b = self.depot_start + travel_time, self.depot_end - travel_time - service_time
-    #     time_centers = (a - b) * torch.rand(batch_size, problem_size) + b
-    #     time_half_width = (service_time / 2 - self.depot_end / 3) * torch.rand(batch_size, problem_size) + self.depot_end / 3
-    #     tw_start = torch.clamp(time_centers - time_half_width, min=self.depot_start, max=self.depot_end)
-    #     tw_end = torch.clamp(time_centers + time_half_width, min=self.depot_start, max=self.depot_end)
-    #     # shape: (batch, problem)
-
-    #     # check tw constraint: feasible solution must exist (i.e., depot -> a random node -> depot must be valid).
-    #     instance_invalid, round_error_epsilon = False, 0.00001
-    #     total_time = torch.max(0 + (depot_xy - node_xy).norm(p=2, dim=-1) / self.speed, tw_start) + service_time + (node_xy - depot_xy).norm(p=2, dim=-1) / self.speed > self.depot_end + round_error_epsilon
-    #     # (batch, problem)
-    #     instance_invalid = total_time.any()
-
-    #     if instance_invalid:
-    #         print(">> Invalid instances, Re-generating ...")
-    #         return self.get_random_problems(batch_size, problem_size, normalized=normalized)
-    #     elif normalized:
-    #         node_demand = torch.randint(1, 10, size=(batch_size, problem_size)) / float(demand_scaler)  # (batch, problem)
-    #         return depot_xy, node_xy, node_demand, route_limit, service_time, tw_start, tw_end
-    #     else:
-    #         node_demand = torch.Tensor(np.random.randint(1, 10, size=(batch_size, problem_size)))  # (unnormalized) shape: (batch, problem)
-    #         capacity = torch.Tensor(np.full(batch_size, demand_scaler))
-    #         return depot_xy, node_xy, node_demand, capacity, route_limit, service_time, tw_start, tw_end
-
-    def get_random_problems(self, batch_size, batch_idx, problem_size, normalized=False):
-        if batch_idx == 0:
-            with open(self.pkl_path, 'rb') as f:
-                data = pickle.load(f)
-
-            # Tách dữ liệu theo batch_size
-            num_instances = len(data[0])  # Số lượng batch
-            if batch_size > num_instances:
-                    raise ValueError("batch_size lớn hơn số lượng instances có trong dữ liệu.")
-            
-            batches_data = []
-            for i in range(0, num_instances, batch_size):
-                    batch_data = [[] for _ in range(batch_size)]
-                    for j in range(batch_size):
-                        if i + j < num_instances:  # Kiểm tra để không vượt quá số lượng batch
-                                batch_data[j] = [
-                                    data[0][i + j],
-                                    data[1][i + j],
-                                    data[2][i + j],
-                                    data[3][i + j],
-                                    data[4][i + j],
-                                    None,
-                                    None,
-                                    data[5][i + j],
-                                    data[6][i + j],
-                                    data[7][i + j],
-                                    data[8][i + j],
-                                ]
-                    batches_data.append(batch_data)
-            self.dataset = batches_data
-            return self.dataset[0]
-        else:
-            return self.dataset[batch_idx]
+        self.train_dataset = [
+                    train_data[1].to(self.device),
+                    train_data[2].to(self.device),
+                    train_data[3].to(self.device),
+                    train_data[4].to(self.device),
+                    train_data[0].to(self.device),
+                    tw_start,
+                    tw_end,
+                    train_data[5].clone().detach().to(dtype=torch.int64).to(self.device),
+                    train_data[6].clone().detach().to(dtype=torch.int64).to(self.device),
+                    train_data[7].clone().detach().to(dtype=torch.int64).to(self.device),
+                    train_data[8].to(self.device),
+                    train_data[9].to(self.device) ]
         
+        # Load val data
+        with open(self.val_pkl_path, 'rb') as pkl_file:
+            val_data = pickle.load(pkl_file)
+        with open(self.val_pkl_path.replace(".pkl", ".json"), 'r') as meta_file:
+            self.val_ntruck_category = json.load(meta_file)
+
+        num_instances = len(val_data[0])
+        tw_start = torch.zeros(size=(num_instances, 1)).to(self.device)
+        tw_end = torch.zeros(size=(num_instances, 1)).to(self.device)
+
+        self.val_dataset = [
+                    val_data[1].to(self.device),
+                    val_data[2].to(self.device),
+                    val_data[3].to(self.device),
+                    val_data[4].to(self.device),
+                    val_data[0].to(self.device),
+                    tw_start,
+                    tw_end,
+                    val_data[5].clone().detach().to(dtype=torch.int64).to(self.device),
+                    val_data[6].clone().detach().to(dtype=torch.int64).to(self.device),
+                    val_data[7].clone().detach().to(dtype=torch.int64).to(self.device),
+                    val_data[8].to(self.device),
+                    val_data[9].to(self.device) ]
+ 
+
+    def get_batch_data(self, mode, batch_size):
+        if mode == "train":
+            ntruck = random.choice((self.train_ntruck_category).keys())
+            batch_idx = random.sample(self.train_ntruck_category[ntruck], batch_size)
+
+            batch_data = tuple(torch.stack([self.train_dataset[i][idx] for idx in batch_idx]) for i in range(len(self.train_dataset)))
+        
+        else:
+            ntruck = random.choice((self.val_ntruck_category).keys())
+            batch_idx = random.sample(self.val_ntruck_category[ntruck], batch_size)
+
+            batch_data = tuple(torch.stack([self.val_dataset[i][idx] for idx in batch_idx]) for i in range(len(self.val_dataset)))
+
+        return (batch_data, ntruck)
     
-    def save_random_problems(self, batch_size, problem_size, normalized=True):
-        """
-        chạy solomon -> [[route1], [route2],...] (m routes)
-        return:
-            - depot_xy (batch, 2), 
-            - node_xy (batch, problem_size, 2), 
-            - node_demand (batch, problem_size), 
-            - route_limit (batch), 
-            - service_time (batch, problem_size), 
-            - tw_start (None), 
-            - tw_end (None), 
-            - init_routes (batch, problem_size): chứa index của đỉnh cuối của từng route (qua solomon) padding đến problem_size (0),
-            - mask_node (batch, problem_size): những đỉnh đã được chọn trong init_routes khởi tạo 1, còn lại 0, 
-            - truck_num (batch, problem_size): khởi tạo 1 với m routes đầu, còn lại 0, 
-            - max_demand (batch)
-        """
-        depot_xy = torch.rand(size=(batch_size, 1, 2))  # (batch, 1, 2)
-        node_xy = torch.rand(size=(batch_size, problem_size, 2))  # (batch, problem, 2)
-
-        if problem_size == 20:
-            demand_scaler = 30
-        elif problem_size == 50:
-            demand_scaler = 40
-        elif problem_size == 100:
-            demand_scaler = 50
-        elif problem_size == 200:
-            demand_scaler = 70
-        else:
-            raise NotImplementedError
-
-        route_limit = torch.ones(batch_size) * 3.0
-
-        if normalized:
-            node_demand = torch.randint(1, 10, size=(batch_size, problem_size)) / float(demand_scaler)  # (batch, problem)
-            return depot_xy, node_xy, node_demand, route_limit
-        else:
-            node_demand = torch.Tensor(np.random.randint(1, 10, size=(batch_size, problem_size)))  # (unnormalized) shape: (batch, problem)
-            capacity = torch.Tensor(np.full(batch_size, demand_scaler))
-
-            #SOLOMON HERE
-
-            for batch_idx in range(batch_size):
-
-                init_routes = [0 for _ in range(problem_size)]
-                mask_node = [0 for _ in range(problem_size)]
-                truck_num = [0 for _ in range(problem_size)]
-
-                cost_matrix = calculate_cost_matrix(torch.cat(depot_xy[batch_idx], node_xy[batch_idx]), dim=0)
-                
-                customers = []
-                for i in range(problem_size):
-                    qi = node_demand[batch_idx][i]
-                    customers.append(Customer_Tu(qi))
-
-                D = route_limit[batch_idx]
-                Q = capacity[batch_idx]
-
-                routes = nearest_neighbor(customers, problem_size, Q, D, cost_matrix)
-
-                if routes != []:
-                    for i, route in enumerate(routes):
-                        init_routes[i] = route[-1]
-
-                for idx in range(problem_size):
-                    if idx < len(routes):
-                        truck_num[idx] = 1
-                    else:
-                        truck_num[idx] = 0
-                        
-                    if idx in init_routes:
-                        mask_node[idx] = 1
-                    else:
-                        mask_node[idx] = 0
-
-                #save pickle
-                
+    def get_random_problems(self, mode, batch_size):
+        if self.train_dataset is None:
+            self.load_pkl_data()
+        return self.get_batch_data(mode, batch_size)                
 
 
-
-            # save pickle
-            # return depot_xy, node_xy, node_demand, route_limit, torch.zeros((batch_size, problem_size)), None, None, init_routes, mask_node, truck_num, capacity
 
     def augment_xy_data_by_8_fold(self, xy_data):
         # xy_data.shape: (batch, N, 2)
