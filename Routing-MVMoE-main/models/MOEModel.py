@@ -35,8 +35,8 @@ class MOEModel(nn.Module):
         # node_tw_start = reset_state.node_tw_start
         # node_tw_end = reset_state.node_tw_end
         # shape: (batch, problem)
-        node_xy_demand = torch.cat((node_xy, node_demand[:, :, None],service_time[:, :, None] ), dim=2)
-        # shape: (batch, problem, 4)
+        node_xy_demand = torch.cat((node_xy, node_demand[:, :, None]), dim=2)
+        # shape: (batch, problem, 3)
         # prob_emb = reset_state.prob_emb
         # shape: (1, 5) - only for problem-level routing/gating
 
@@ -64,7 +64,6 @@ class MOEModel(nn.Module):
         self.aux_loss += moe_loss
         # shape: (batch, pomo, problem+1)
         if selected is None:
-            if(state)
             while True:
                     if self.training or self.eval_type == 'softmax':
                         try:
@@ -156,12 +155,12 @@ class MTL_Encoder(nn.Module):
             self.embedding_depot = MoE(input_size=2, output_size=embedding_dim, num_experts=self.model_params['num_experts'],
                                        k=self.model_params['topk'], T=1.0, noisy_gating=True, routing_level=self.model_params['routing_level'],
                                        routing_method=self.model_params['routing_method'], moe_model="Linear")
-            self.embedding_node = MoE(input_size=4, output_size=embedding_dim, num_experts=self.model_params['num_experts'],
+            self.embedding_node = MoE(input_size=3, output_size=embedding_dim, num_experts=self.model_params['num_experts'],
                                       k=self.model_params['topk'], T=1.0, noisy_gating=True, routing_level=self.model_params['routing_level'],
                                       routing_method=self.model_params['routing_method'], moe_model="Linear")
         else:
             self.embedding_depot = nn.Linear(2, embedding_dim)
-            self.embedding_node = nn.Linear(4, embedding_dim)
+            self.embedding_node = nn.Linear(3, embedding_dim)
         self.layers = nn.ModuleList([EncoderLayer(i, **model_params) for i in range(encoder_layer_num)])
 
     def forward(self, node_xy_demand_tw):
