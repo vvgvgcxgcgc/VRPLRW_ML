@@ -125,7 +125,7 @@ class Trainer:
         pomo_cost = train_data[-1]
         n = env.problem_size
         batch_size = train_data[0].size(0)
-        env.load_problems(batch_size, problems=data, aug_factor=1)
+        env.load_problems(batch_size, problems=train_data[:-1], aug_factor=1)
         reset_state, _, _ = env.reset()
         self.model.pre_forward(reset_state)
         prob_list = torch.zeros(size=(batch_size, env.pomo_size, 0))
@@ -172,7 +172,7 @@ class Trainer:
         finis = 0
 
         with torch.no_grad():
-            env.load_problems(batch_size, problems=data, aug_factor=aug_factor)
+            env.load_problems(batch_size, problems=train_data[:-1], aug_factor=aug_factor)
             reset_state, _, _ = env.reset()
             self.model.pre_forward(reset_state)
             state, reward, done = env.pre_step()

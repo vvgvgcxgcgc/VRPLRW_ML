@@ -257,6 +257,9 @@ def init_travel_time_demand( depot, node_xy, node_demand, service_time,  node_in
     """
     # Gather node coordinates using the indices
     device = depot.device
+
+    depot = depot.unsqueeze(1)
+
     routes_demand = torch.gather(node_demand, 1, node_indices)
     routes_demand = routes_demand * truck_num
 
@@ -424,27 +427,6 @@ class VRPLTWEnv:
         self.selected_node_list = None
         # shape: (batch, pomo, 0~)
 
-        # Dynamic-2
-        ####################################
-        # self.at_the_depot = None
-        # # shape: (batch, pomo)
-        # self.load = None
-        # # shape: (batch, pomo)
-        # self.visited_ninf_flag = None
-        # # shape: (batch, pomo, problem+1)
-        # self.ninf_mask = None
-        # # shape: (batch, pomo, problem+1)
-        # self.finished = None
-        # # shape: (batch, pomo)
-        # self.current_time = None
-        # # shape: (batch, pomo)
-        # self.length = None
-        # # shape: (batch, pomo)
-        # self.open = None
-        # # shape: (batch, pomo)
-        # self.current_coord = None
-        # # shape: (batch, pomo, 2)
-
         # states to return
         ####################################
         self.reset_state = Reset_State()
@@ -457,20 +439,9 @@ class VRPLTWEnv:
             depot_xy, node_xy, node_demand, route_limit, service_time, tw_start, tw_end, init_routes, mask_node, truck_num, max_demand = self.get_random_problems(batch_size, self.problem_size, normalized=True)
         self.batch_size = depot_xy.size(0).to(self.device)
         
-        self.num_problem = depot_xy.size(1).to(self.device)
+        self.num_problem = node_xy.size(1).to(self.device)
         self.mask_node = mask_node.to(self.device)
-        # if aug_factor > 1:
-        #     if aug_factor == 8:
-        #         self.batch_size = self.batch_size * 8
-        #         depot_xy = self.augment_xy_data_by_8_fold(depot_xy)
-        #         node_xy = self.augment_xy_data_by_8_fold(node_xy)
-        #         node_demand = node_demand.repeat(8, 1)
-        #         route_limit = route_limit.repeat(8, 1)
-        #         service_time = service_time.repeat(8, 1)
-        #         tw_start = tw_start.repeat(8, 1)
-        #         tw_end = tw_end.repeat(8, 1)
-        #     else:
-        #         raise NotImplementedError
+
         self.node_xy = node_xy.to(self.device)
         self.depot = depot_xy.to(self.device)
         self.depot_node_xy = torch.cat((depot_xy, node_xy), dim=1).to(self.device)
@@ -500,22 +471,14 @@ class VRPLTWEnv:
 
         self.step_state.BATCH_IDX = self.BATCH_IDX
         self.step_state.POMO_IDX = self.POMO_IDX
-        # self.step_state.open = torch.zeros(self.batch_size, self.pomo_size).to(self.device)
-        # self.step_state.START_NODE = torch.arange(start=1, end=self.pomo_size + 1)[None, :].expand(self.batch_size, -1).to(self.device)
+
         self.step_state.PROBLEM = self.problem
         self.step_state.truck_num = self.truck_num.unsqueeze(1).expand(self.batch_size, self.pomo_size,-1).to(self.device)
-        
-        # padded_routes = torch.full((self.batch_size, self.problem_size), self.problem_size, dtype=init_routes.dtype)  # Shape: (2, 5)
-        # padded_routes[:,0] =  init_routes # init_routes.shape(batch,problem)
-        # init_routes = init_routes.expand(-1, self.pomo_size, -1)
-        # self.step_state.current_routes = init_routes
+
         self.step_state.cur_travel_time_routes, self.step_state.current_routes,  self.step_state.cur_demands, self.duration_mask = init_travel_time_demand(self.depot, self.node_xy,self.node_demand, self.init_routes,self.route_limit, self.truck_num, self.speed)
         self.step_state.cur_travel_time_routes = self.step_state.cur_travel_time_routes.unsqueeze(1).expand(-1, self.pomo_size, -1, -1)
         self.step_state.current_routes = self.step_state.current_routes.unsqueeze(1).expand(-1, self.pomo_size, -1, -1)
         self.step_state.cur_demands = self.step_state.cur_demands.unsqueeze(1).expand(-1, self.pomo_size, -1)
-        # self.step_state.cur_demands = torch.where(init_routes == self.problem_size, torch.tensor(0, dtype=torch.int32), node_demand)
-        # self.step_state.current_routes, self.step_state.cur_demands, self.step_state.tw_start_routes, self.step_state.tw_end_routes = calculate_tw_demand_index(tw_start, tw_end, node_demand, init_routes, self.truck_num, self.pomo_size)
-
 
 
     def reset(self):
@@ -524,15 +487,6 @@ class VRPLTWEnv:
         # shape: (batch, pomo)
         self.current_route = None
         #shape: (batch, pomo)
-        # self.selected_node_list = torch.zeros((self.batch_size, self.pomo_size, 0), dtype=torch.long).to(self.device)
-        # shape: (batch, pomo, 0~)
-
-        # self.at_the_depot = torch.ones(size=(self.batch_size, self.pomo_size), dtype=torch.bool).to(self.device)
-        # shape: (batch, pomo)
-        # self.load = torch.ones(size=(self.batch_size, self.pomo_size, self.problem_size)).to(self.device)
-        # shape: (batch, pomo)
-        # self.visited_ninf_flag = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size, self.problem_size)).to(self.device)
-       
 
         # shape: (batch, pomo, problem+1)
         self.init_mask = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size,self.problem_size )).to(self.device)
@@ -690,18 +644,18 @@ class VRPLTWEnv:
         tw_end = torch.zeros(size=(num_instances, 1)).to(self.device)
 
         self.val_dataset = [
-                    val_data[1].to(self.device),
-                    val_data[2].to(self.device),
-                    val_data[3].to(self.device),
-                    val_data[4].to(self.device),
-                    val_data[0].to(self.device),
+                    val_data[1].to(self.device), # depot_xy
+                    val_data[2].to(self.device), # node_xy
+                    val_data[3].to(self.device), # node_demand
+                    val_data[4].to(self.device), # route_limit
+                    val_data[0].to(self.device), # service_time
                     tw_start,
                     tw_end,
-                    val_data[5].clone().detach().to(dtype=torch.int64).to(self.device),
-                    val_data[6].clone().detach().to(dtype=torch.int64).to(self.device),
-                    val_data[7].clone().detach().to(dtype=torch.int64).to(self.device),
-                    val_data[8].to(self.device),
-                    val_data[9].to(self.device) ]
+                    val_data[5].clone().detach().to(dtype=torch.int64).to(self.device), # init_routes
+                    val_data[6].clone().detach().to(dtype=torch.int64).to(self.device), # mask_node
+                    val_data[7].clone().detach().to(dtype=torch.int64).to(self.device), # truck_num
+                    val_data[8].to(self.device), # capacity
+                    val_data[9].to(self.device) ] # solomon_cost
  
 
     def get_batch_data(self, mode, batch_size):
