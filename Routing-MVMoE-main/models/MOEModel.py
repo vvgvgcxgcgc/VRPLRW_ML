@@ -64,6 +64,7 @@ class MOEModel(nn.Module):
         self.aux_loss += moe_loss
         # shape: (batch, pomo, problem+1)
         if selected is None:
+            if(state)
             while True:
                     if self.training or self.eval_type == 'softmax':
                         try:

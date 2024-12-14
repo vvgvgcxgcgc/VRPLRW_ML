@@ -119,7 +119,10 @@ class Trainer:
     def _train_one_batch(self, data, env):
         self.model.train()
         self.model.set_eval_type(self.model_params["eval_type"])
-        batch_size = data.size(0) if isinstance(data, torch.Tensor) else data[-1].size(0)
+        train_data, num = data
+        pomo_cost = train_data[-1]
+        n = env.problem_size
+        batch_size = train_data[0].size(0)
         env.load_problems(batch_size, problems=data, aug_factor=1)
         reset_state, _, _ = env.reset()
         self.model.pre_forward(reset_state)
@@ -128,19 +131,23 @@ class Trainer:
 
         # POMO Rollout
         state, reward, done = env.pre_step()
+        finis = 0
         # print("{}\n".format(state.PROBLEM))
-        while not done:
+        while (finis < n - num):
             selected, prob = self.model(state)
             # shape: (batch, pomo)
+            if(finis == n -num - 1): env.step_state.done = True
             state, reward, done = env.step(selected)
             prob_list = torch.cat((prob_list, prob[:, :, None]), dim=2)
+            finis  = finis + 1
 
         # Loss
-        advantage = reward - reward.float().mean(dim=1, keepdims=True)  # (batch, pomo)
-        log_prob = prob_list.log().sum(dim=2)
+        advantage = reward.squeeze(1) + pomo_cost  # (batch, pomo)
+        prob_list = prob_list.squeeze(1)
+        log_prob = prob_list.log().sum(dim=1)
         loss = -advantage * log_prob  # Minus Sign: To Increase REWARD
         loss_mean = loss.mean()
-        max_pomo_reward, _ = reward.max(dim=1)  # get best results from pomo
+        max_pomo_reward= reward # get best results from pomo
         score_mean = -max_pomo_reward.float().mean()  # negative sign to make positive value
 
         if hasattr(self.model, "aux_loss"):

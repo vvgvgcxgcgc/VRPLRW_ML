@@ -592,11 +592,11 @@ class VRPLTWEnv:
         self.step_state.ninf_mask = update_demand_mask(self.step_state.cur_demands, self.node_demand, self.step_state.ninf_mask, self.max_demand,self.current_route)
 
         #route limit constraint
-        self.ninf_mask = update_duration_mask(self.step_state.ninf_mask, self.step_state.current_routes,self.step_state.cur_travel_time_routes,self.service_time, self.route_limit,self.step_state.truck_num,self.current_route, self.node_xy,self.depot, self.speed)
-        self.step_state.ninf_mask = torch.sum(self.ninf_mask, dim = -1)
-        self.mask = torch.where(self.mask == self.problem_size, float('-inf'), 0)
+        self.step_state.ninf_mask = update_duration_mask(self.step_state.ninf_mask, self.step_state.current_routes,self.step_state.cur_travel_time_routes,self.service_time, self.route_limit,self.step_state.truck_num,self.current_route, self.node_xy,self.depot, self.speed)
+        self.c_mask = torch.sum(self.step_state.ninf_mask, dim = -1)
+        
+        self.mask = torch.where(self.c_mask == self.problem_size, float('-inf'), 0)
 
-        self.step_state.selected_count = self.selected_count
 
         self.step_state.mask = self.mask
 
