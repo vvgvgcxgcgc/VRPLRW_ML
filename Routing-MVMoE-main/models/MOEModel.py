@@ -31,19 +31,18 @@ class MOEModel(nn.Module):
         node_xy = reset_state.node_xy
         # shape: (batch, problem, 2)
         node_demand = reset_state.node_demand
-        node_tw_start = reset_state.node_tw_start
-        node_tw_end = reset_state.node_tw_end
+        service_time = reset_state.node_service_time
+        # node_tw_start = reset_state.node_tw_start
+        # node_tw_end = reset_state.node_tw_end
         # shape: (batch, problem)
-        node_xy_demand_tw = torch.cat((node_xy, node_demand[:, :, None], node_tw_start[:, :, None], node_tw_end[:, :, None]), dim=2)
-        # shape: (batch, problem, 5)
+        node_xy_demand = torch.cat((node_xy, node_demand[:, :, None],service_time[:, :, None] ), dim=2)
+        # shape: (batch, problem, 4)
         # prob_emb = reset_state.prob_emb
         # shape: (1, 5) - only for problem-level routing/gating
 
-        self.encoded_nodes, moe_loss = self.encoder( node_xy_demand_tw)
+        self.encoded_nodes, moe_loss = self.encoder( node_xy_demand)
         self.aux_loss = moe_loss
         # shape: (batch, problem, embedding)
-        self.decoder.set_q_last(self.encoded_nodes)
-
 
     def set_eval_type(self, eval_type):
         self.eval_type = eval_type
@@ -52,42 +51,20 @@ class MOEModel(nn.Module):
         batch_size = state.BATCH_IDX.size(0)
         pomo_size = state.BATCH_IDX.size(1)
 
-        # if state.selected_count == 0:  # First Move, depot
-        if False:
-            selected = torch.zeros(size=(batch_size, pomo_size), dtype=torch.long).to(self.device)
-            prob = torch.ones(size=(batch_size, pomo_size))
-            # probs = torch.ones(size=(batch_size, pomo_size, self.encoded_nodes.size(1)))
-            # shape: (batch, pomo, problem_size+1)
 
-            # # Use Averaged encoded nodes for decoder input_1
-            # encoded_nodes_mean = self.encoded_nodes.mean(dim=1, keepdim=True)
-            # # shape: (batch, 1, embedding)
-            # self.decoder.set_q1(encoded_nodes_mean)
+        # encoded_last_node = _get_encoding(self.encoded_nodes, state.current_node)
+        encoded_routes = get_routes_encoding(self.encoded_nodes, state.current_routes, state.position_encodings) # encoding route
+        # shape: (batch, pomo, embedding)
+        # attr = torch.cat((state.load[:, :, None], state.current_time[:, :, None], state.length[:, :, None], state.open[:, :, None]), dim=2)
+        # shape: (batch, pomo, 4)
+        # probs, moe_loss = self.decoder(encoded_last_node, attr, ninf_mask=state.ninf_mask)
+        self.decoder.set_q_last(self.encoded_nodes.unsqueeze(1).expand(-1, pomo_size, -1, -1 ))
 
-            # # Use encoded_depot for decoder input_2
-            # encoded_first_node = self.encoded_nodes[:, [0], :]
-            # # shape: (batch, 1, embedding)
-            # self.decoder.set_q2(encoded_first_node)
-
-        # elif state.selected_count == 1:  # Second Move, POMO
-        elif False:
-            # selected = torch.arange(start=1, end=pomo_size+1)[None, :].expand(batch_size, -1).to(self.device)
-            selected = state.START_NODE
-            prob = torch.ones(size=(batch_size, pomo_size))
-            # probs = torch.ones(size=(batch_size, pomo_size, self.encoded_nodes.size(1)))
-
-        else:
-            # encoded_last_node = _get_encoding(self.encoded_nodes, state.current_node)
-            encoded_routes = get_routes_encoding(self.encoded_nodes, state.current_routes, state.position_encodings) # encoding route
-            # shape: (batch, pomo, embedding)
-            # attr = torch.cat((state.load[:, :, None], state.current_time[:, :, None], state.length[:, :, None], state.open[:, :, None]), dim=2)
-            # shape: (batch, pomo, 4)
-            # probs, moe_loss = self.decoder(encoded_last_node, attr, ninf_mask=state.ninf_mask)
-            probs, moe_loss = self.decoder(encoded_routes, ninf_mask=state.ninf_mask)
-            self.aux_loss += moe_loss
-            # shape: (batch, pomo, problem+1)
-            if selected is None:
-                while True:
+        probs, moe_loss = self.decoder(encoded_routes, ninf_mask=state.mask)
+        self.aux_loss += moe_loss
+        # shape: (batch, pomo, problem+1)
+        if selected is None:
+            while True:
                     if self.training or self.eval_type == 'softmax':
                         try:
                             selected = probs.reshape(batch_size * pomo_size, -1).multinomial(1).squeeze(dim=1).reshape(batch_size, pomo_size)
@@ -100,9 +77,9 @@ class MOEModel(nn.Module):
                     # shape: (batch, pomo)
                     if (prob != 0).all():
                         break
-            else:
-                selected = selected
-                prob = probs[state.BATCH_IDX, state.POMO_IDX, selected].reshape(batch_size, pomo_size)
+        else:
+            selected = selected
+            prob = probs[state.BATCH_IDX, state.POMO_IDX, selected].reshape(batch_size, pomo_size)
 
         return selected, prob
 
@@ -146,7 +123,7 @@ def get_routes_encoding(encoded_nodes, route_index, postion_encodings, truck_num
 
     # Gather encoded_nodes theo route_index
     encode_routes = torch.gather(encoded_nodes_expanded.expand(-1, pomo, -1, -1), 2, route_index_expanded)  # Shape: (batch, pomo, problem, problem, embedding)
-    encode_routes = torch.concat((encode_routes, postion_encodings[:, :, :, :-1].unsqueeze(-1)))
+    encode_routes = torch.concat((encode_routes, postion_encodings[:, :, :, :-1].unsqueeze(-1)), dim = -1 )
     range_tensor = torch.arange(n).unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(-1) # Shape: (1, 1, 1, n)
     
     mask = range_tensor < truck_num.unsqueeze(-1).unsqueeze(-1)
@@ -157,7 +134,7 @@ def get_routes_encoding(encoded_nodes, route_index, postion_encodings, truck_num
     # Nếu chỉ muốn shape (batch, pomo, problem, problem), bạn có thể chọn trung bình hoặc giá trị cụ thể theo embedding
     encode_routes = encode_routes.mean(3)  # Hoặc torch.mean(encode_route, dim=-1)
 
-    return encode_routes # shape(batch, pomo, problem, embedding)
+    return encode_routes # shape(batch, pomo, problem, embedding + 1)
 
 
 
@@ -178,12 +155,12 @@ class MTL_Encoder(nn.Module):
             self.embedding_depot = MoE(input_size=2, output_size=embedding_dim, num_experts=self.model_params['num_experts'],
                                        k=self.model_params['topk'], T=1.0, noisy_gating=True, routing_level=self.model_params['routing_level'],
                                        routing_method=self.model_params['routing_method'], moe_model="Linear")
-            self.embedding_node = MoE(input_size=5, output_size=embedding_dim, num_experts=self.model_params['num_experts'],
+            self.embedding_node = MoE(input_size=4, output_size=embedding_dim, num_experts=self.model_params['num_experts'],
                                       k=self.model_params['topk'], T=1.0, noisy_gating=True, routing_level=self.model_params['routing_level'],
                                       routing_method=self.model_params['routing_method'], moe_model="Linear")
         else:
             self.embedding_depot = nn.Linear(2, embedding_dim)
-            self.embedding_node = nn.Linear(5, embedding_dim)
+            self.embedding_node = nn.Linear(4, embedding_dim)
         self.layers = nn.ModuleList([EncoderLayer(i, **model_params) for i in range(encoder_layer_num)])
 
     def forward(self, node_xy_demand_tw):
@@ -300,11 +277,11 @@ class MTL_Decoder(nn.Module):
 
         # [Option 3]: Use MoEs in Decoder
         if self.model_params['num_experts'] > 1 and 'Dec' in self.model_params['expert_loc']:
-            self.multi_head_combine = MoE(input_size=head_num * qkv_dim, output_size=embedding_dim, num_experts=self.model_params['num_experts'],
+            self.multi_head_combine = MoE(input_size=head_num * qkv_dim, output_size=embedding_dim + 1, num_experts=self.model_params['num_experts'],
                                           k=self.model_params['topk'], T=1.0, noisy_gating=True, routing_level=self.model_params['routing_level'],
                                           routing_method=self.model_params['routing_method'], moe_model="Linear")
         else:
-            self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
+            self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim + 1)
 
         self.k = None  # saved key, for multi-head attention
         self.v = None  # saved value, for multi-head_attention
@@ -316,27 +293,27 @@ class MTL_Decoder(nn.Module):
         # encoded_routes.shape: (batch, nr, embedding)
         head_num = self.model_params['head_num']
 
-        self.k = reshape_by_heads(self.Wk(encoded_routes), head_num=head_num)
-        self.v = reshape_by_heads(self.Wv(encoded_routes), head_num=head_num)
+        self.k = reshape_by_heads1(self.Wk(encoded_routes), head_num=head_num)
+        self.v = reshape_by_heads1(self.Wv(encoded_routes), head_num=head_num)
         # shape: (batch, head_num, nr, qkv_dim)
-        self.single_head_key = encoded_routes.transpose(1, 2)
-        # shape: (batch, embedding, nr)
+        self.single_head_key = encoded_routes.transpose(2, 3)
+        # shape: (batch,pomo, embedding + 1, nr)
 
     def set_q1(self, encoded_q1):
         # encoded_q.shape: (batch, n, embedding)  # n can be 1 or pomo
         head_num = self.model_params['head_num']
-        self.q1 = reshape_by_heads(self.Wq_1(encoded_q1), head_num=head_num)
+        self.q1 = reshape_by_heads1(self.Wq_1(encoded_q1), head_num=head_num)
         # shape: (batch, head_num, n, qkv_dim)
 
     def set_q2(self, encoded_q2):
         # encoded_q.shape: (batch, n, embedding)  # n can be 1 or pomo
         head_num = self.model_params['head_num']
-        self.q2 = reshape_by_heads(self.Wq_2(encoded_q2), head_num=head_num)
+        self.q2 = reshape_by_heads1(self.Wq_2(encoded_q2), head_num=head_num)
         # shape: (batch, head_num, n, qkv_dim)
     def set_q_last(self, encoded_nodes):
         head_num = self.model_params['head_num']
 
-        self.q_last = reshape_by_heads(self.Wq_last(encoded_nodes), head_num=head_num)
+        self.q_last = reshape_by_heads1(self.Wq_last(encoded_nodes), head_num=head_num)
 
 
 
@@ -360,19 +337,19 @@ class MTL_Decoder(nn.Module):
         # q = q_last
         # shape: (batch, head_num, pomo, qkv_dim)
 
-        out_concat = multi_head_attention(self.q_last, self.k, self.v, rank3_ninf_mask=ninf_mask)
-        # shape: (batch, pomo, head_num*qkv_dim)
+        out_concat = multi_head_attention1(self.q_last, self.k, self.v, rank3_ninf_mask=ninf_mask)
+        # shape: (batch, pomo, n,  head_num*qkv_dim)
 
         if isinstance(self.multi_head_combine, MoE):
             mh_atten_out, moe_loss = self.multi_head_combine(out_concat)
         else:
             mh_atten_out = self.multi_head_combine(out_concat)
-        # shape: (batch, pomo, embedding)
+        # shape: (batch, pomo,n,  embedding)
 
         #  Single-Head Attention, for probability calculation
         #######################################################
         score = torch.matmul(mh_atten_out, self.single_head_key)
-        # shape: (batch, pomo, problem)
+        # shape: (batch, pomo,n, problem)
 
         sqrt_embedding_dim = self.model_params['sqrt_embedding_dim']
         logit_clipping = self.model_params['logit_clipping']
@@ -382,11 +359,7 @@ class MTL_Decoder(nn.Module):
 
         score_clipped = logit_clipping * torch.tanh(score_scaled)
 
-        score_masked = score_clipped + ninf_mask
-        batch = score_masked.size(0)
-        pomo = score_masked.size(1)
-        problem = score_masked.size(2)
-        score_masked = score_masked.view(batch, pomo, problem * problem)
+        score_masked = torch.mean(score_clipped, dim = -1)*ninf_mask
 
         probs = F.softmax(score_masked, dim=2)
         # shape: (batch, pomo, problem)
@@ -411,6 +384,18 @@ def reshape_by_heads(qkv, head_num):
     # shape: (batch, head_num, n, key_dim)
 
     return q_transposed
+def reshape_by_heads1(qkv, head_num):
+    batch_s = qkv.size(0)
+    pomo = qkv.size(1)
+    n = qkv.size(2)
+    q_reshaped = qkv.reshape(batch_s,pomo n, head_num, -1)
+    # shape: (batch, n, head_num, key_dim)
+
+    q_transposed = q_reshaped.transpose(2, 3)
+    # shape: (batch, pomo head_num, n, key_dim)
+
+    return q_transposed
+
 
 
 def multi_head_attention(q, k, v, rank2_ninf_mask=None, rank3_ninf_mask=None):
@@ -446,6 +431,44 @@ def multi_head_attention(q, k, v, rank2_ninf_mask=None, rank3_ninf_mask=None):
 
     out_concat = out_transposed.reshape(batch_s, n, head_num * key_dim)
     # shape: (batch, n, head_num*key_dim)
+
+    return out_concat
+
+def multi_head_attention1(q, k, v, rank2_ninf_mask=None, rank3_ninf_mask=None):
+    # q shape: (batch,pomo, head_num, n, key_dim)   : n can be either 1 or PROBLEM_SIZE
+    # k,v shape: (batch,pomo, head_num, problem, key_dim)
+    # rank2_ninf_mask.shape: (batch, problem)
+    # rank3_ninf_mask.shape: (batch, group, problem)
+
+    batch_s = q.size(0)
+    pomo = q.size(0)
+    head_num = q.size(2)
+    n = q.size(3)
+    key_dim = q.size(4)
+
+    input_s = k.size(3)
+
+    score = torch.matmul(q, k.transpose(3, 4))
+    # shape: (batch, pomo, head_num, n, problem)
+
+    score_scaled = score / torch.sqrt(torch.tensor(key_dim, dtype=torch.float))
+    if rank2_ninf_mask is not None:
+        pass
+        # score_scaled = score_scaled + rank2_ninf_mask[:, None, None, :].expand(batch_s, head_num, n, input_s)
+    if rank3_ninf_mask is not None:
+        score_scaled = score_scaled + rank3_ninf_mask[:, :,None, :, None].expand(batch_s,pomo, head_num, n, input_s)
+
+    weights = nn.Softmax(dim=4)(score_scaled)
+    # shape: (batch, head_num, n, problem)
+
+    out = torch.matmul(weights, v)
+    # shape: (batch, head_num, n, key_dim)
+
+    out_transposed = out.transpose(2, 3)
+    # shape: (batch, n, head_num, key_dim)
+
+    out_concat = out_transposed.reshape(batch_s, n, head_num * key_dim)
+    # shape: (batch,pomo, n, head_num*key_dim)
 
     return out_concat
 
