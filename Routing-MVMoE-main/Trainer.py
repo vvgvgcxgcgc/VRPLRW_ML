@@ -167,15 +167,19 @@ class Trainer:
         pomo_cost = train_data[-1]
         n = env.problem_size
         batch_size = train_data[0].size(0)
+        finis = 0
+
         with torch.no_grad():
             env.load_problems(batch_size, problems=data, aug_factor=aug_factor)
             reset_state, _, _ = env.reset()
             self.model.pre_forward(reset_state)
             state, reward, done = env.pre_step()
-            while not done:
+            while (finis < n - num):
                 selected, _ = self.model(state)
                 # shape: (batch, pomo)
+                if(finis == n -num - 1): env.step_state.done = True
                 state, reward, done = env.step(selected)
+                finis = finis + 1
 
         # Return
         aug_reward = reward.squeeze(1)
