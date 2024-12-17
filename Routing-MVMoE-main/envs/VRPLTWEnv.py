@@ -639,11 +639,11 @@ class VRPLTWEnv:
             eroutes[self.K_IDX, self.POMO_IDX, zero_indices, :] = selected
             select_demand = torch.gather(enode_demand.unsqueeze(1).expand(-1, self.pomo_size, -1),2,  selected.unsqueeze(-1))
             edemand[ self.K_IDX, self.POMO_IDX, zero_indices] = select_demand.squeeze(-1)
-            selected_node_xy = torch.gather(self.node_xy.unsqueeze(-1, self.pomo_size, -1, -1), 2, selected.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 2))  # Shape: (batch, m, 2)
-            selected_service_time= torch.gather(service_time.unsqueeze(-1, self.pomo_size, -1), 2, selected.unsqueeze(-1).expand(-1, -1, 1)).squeeze(-1) 
+            selected_node_xy = torch.gather(self.node_xy[indices].unsqueeze(-1, self.pomo_size, -1, -1), 2, selected.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 2))  # Shape: (batch, m, 2)
+            selected_service_time= torch.gather(self.service_time[indices].unsqueeze(-1, self.pomo_size, -1), 2, selected.unsqueeze(-1).expand(-1, -1, 1)).squeeze(-1) 
             
             # Compute the difference in coordinates
-            delta = selected_node_xy - self.depot.unsqueeze(1)  # Shape: (batch, m, 1, 2)
+            delta = selected_node_xy - self.depot[indices].unsqueeze(1)  # Shape: (batch, m, 1, 2)
         
             # Compute Euclidean distances
             distances = torch.sqrt(torch.sum(delta ** 2, dim=-1)).squeeze(-1)  # Shape: (batch, m, 1)
@@ -657,19 +657,19 @@ class VRPLTWEnv:
             emask[ self.K_IDX, self.POMO_IDX, :, zero_indices] = 0
             emask = emask | (enodemask.unsqueeze(-1).expand(-1, -1, -1, self.problem_size))
             emask = update_demand_mask(edemand, 
-                                        self.node_demand, 
+                                        self.node_demand[indices], 
                                         emask, 
-                                        self.max_demand,
+                                        self.max_demand[indices],
                                         zero_indices)
             emask = update_duration_mask(emask, 
                                         eroutes,
                                         ecost,
-                                        self.service_time, 
-                                        self.route_limit,
+                                        self.service_time[indices], 
+                                        self.route_limit[indices],
                                         etruck_num,
                                         zero_indices, 
-                                        self.node_xy,
-                                        self.depot, 
+                                        self.node_xy[indices],
+                                        self.depot[indices], 
                                         self.speed)
 
             self.old_truck[indices] = etruck_num  
