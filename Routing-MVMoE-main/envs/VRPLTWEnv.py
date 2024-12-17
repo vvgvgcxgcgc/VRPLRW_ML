@@ -76,7 +76,7 @@ def update_duration_mask(cur_mask, cur_routes, routes_cost, service_time,   max_
     device = cur_mask.device
     BATCH_IDX = torch.arange(batch)[:, None, None].expand(batch, pomo, n).to(device)
     POMO_IDX = torch.arange(pomo)[None, :, None].expand(batch, pomo, n).to(device)
-    ROUTE_IDX =  torch.arange(pomo)[None, None, :].expand(batch, pomo, n).to(device)
+    ROUTE_IDX =  torch.arange(n)[None, None, :].expand(batch, pomo, n).to(device)
 
     selected_route_cost = torch.gather(routes_cost, 2, selected_route.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, n + 1)).squeeze(2)
     nodes_route = torch.gather(cur_routes, 2, selected_route.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, n)).squeeze(2)
@@ -169,7 +169,7 @@ def update_route(node_xy, depot,node_demand,service_time, cur_demands, truck_num
     batch, pomo, _, n = cur_routes.shape
     BATCH_IDX = torch.arange(batch)[:, None, None].expand(batch, pomo, n).to(device)
     POMO_IDX = torch.arange(pomo)[None, :, None].expand(batch, pomo, n).to(device)
-    ROUTE_IDX =  torch.arange(pomo)[None, None, :].expand(batch, pomo, n).to(device)
+    ROUTE_IDX =  torch.arange(n)[None, None, :].expand(batch, pomo, n).to(device)
     # raw_selected_route = selected_route.clone()
     # selected_route = selected_route.unsqueeze(-1)
     # node_num = torch.gather(truck_num, 2, selected_route) # shape (batch, pomo, 1)
@@ -572,7 +572,7 @@ class VRPLTWEnv:
         # self.current_route = s #shape(batch, pomo)
         self.old_routes = self.step_state.current_routes.clone()
         self.routes_cost  = self.step_state.cur_travel_time_routes.clone()
-        sef.old_truck = self.step_state.truck_num.clone()
+        self.old_truck = self.step_state.truck_num.clone()
         self.old_demand = self.step_state.cur_demands.clone()
         self.old_mask = self.step_state.ninf_mask.clone()
         self.node_mask = torch.gather(self.step_state.ninf_mask, 2,self.current_node.unsqueeze(-1).unsqueeze(-1).expand(-1,-1, 1, self.problem_size)).squeeze(2)
@@ -632,6 +632,7 @@ class VRPLTWEnv:
             ecost = self.routes_cost[indices]
             edemand = self.old_demand[indices]
             emask = self.old_mask[indices]
+            enodemask = self.mask_node[indices]
             zero_indices = (etruck_num == 0).argmax(dim=2)  # shape (k,1)
             self.K_IDX = torch.arange(k)[:, None].expand(k, self.pomo_size).to(self.device)
             etruck_num[ self.K_IDX, self.POMO_IDX, zero_indices] = 1
@@ -652,20 +653,43 @@ class VRPLTWEnv:
             ecost[ self.K_IDX, self.POMO_IDX, zero_indices, 0] =  travel_times + selected_service_time
 
             ecost[ self.K_IDX, self.POMO_IDX, zero_indices, 1] =  travel_times 
-            
-            
-            
 
-            
-            
-            
-            
-            
+            emask[ self.K_IDX, self.POMO_IDX, :, zero_indices] = 0
+            emask = emask | (enodemask.unsqueeze(-1).expand(-1, -1, -1, self.problem_size))
+            emask = update_demand_mask(edemand, 
+                                        self.node_demand, 
+                                        emask, 
+                                        self.max_demand,
+                                        zero_indices)
+            emask = update_duration_mask(emask, 
+                                        eroutes,
+                                        ecost,
+                                        self.service_time, 
+                                        self.route_limit,
+                                        etruck_num,
+                                        zero_indices, 
+                                        self.node_xy,
+                                        self.depot, 
+                                        self.speed)
 
-            
+            self.old_truck[indices] = etruck_num  
+            self.old_routes[indices] = eroutes 
+            self.routes_cost[indices] = ecost 
+            self.old_demand[indices] = edemand
+            self.old_mask[indices] = emask
+            self.step_state.current_routes = self.old_routes
+            self.step_state.cur_travel_time_routes = self.routes_cost  
+            self.step_state.truck_num = self.old_truck
+            self.step_state.cur_demands = self.old_demand
+            self.step_state.ninf_mask = self.old_mask 
+            self.c_mask = torch.sum(self.step_state.ninf_mask, dim = -1)
+        
+            self.mask = torch.where(self.c_mask == self.problem_size, float('-inf'), 0.0)
 
-            
-            
+
+            self.step_state.mask = self.mask 
+
+
             
 
         # indices = (self.c_mask == self.problem_size * self.problem_size).nonzero()
