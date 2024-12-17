@@ -4,6 +4,7 @@ import os, pickle
 import numpy as np
 import random
 import json
+torch.autograd.set_detect_anomaly(True)
 
 __all__ = ['VRPLTWEnv']
 
@@ -62,6 +63,7 @@ class Step_State:
     total_time: torch.Tensor = None
     cur_index: torch.Tensor = None
     mask: torch.Tensor = None
+    init_mask: torch.Tensor = None
     done = False
 
 
@@ -82,8 +84,8 @@ def update_duration_mask(cur_mask, cur_routes, routes_cost, service_time,   max_
 
     nodes_num = torch.gather(truck_num, 2, selected_route.unsqueeze(-1)).expand(batch, pomo, n)
     total_cost = torch.sum(selected_route_cost, dim = 2)
-    # suspect_pos = torch.concat((nodes_route[BATCH_IDX, POMO_IDX,cur_index].unsqueeze(-1), nodes_route[BATCH_IDX, POMO_IDX,cur_index -1].unsqueeze(-1), nodes_route[BATCH_IDX, POMO_IDX,cur_index -1].unsqueeze(-1)), 2)
-    node_xy_expand = node_xy.unqueeze(1).expand(-1, pomo, -1, -1)
+    # suspect_pos = torch.cat((nodes_route[BATCH_IDX, POMO_IDX,cur_index].unsqueeze(-1), nodes_route[BATCH_IDX, POMO_IDX,cur_index -1].unsqueeze(-1), nodes_route[BATCH_IDX, POMO_IDX,cur_index -1].unsqueeze(-1)), 2)
+    node_xy_expand = node_xy.unsqueeze(1).expand(-1, pomo, -1, -1)
     nodes_route_coords = torch.gather(node_xy_expand, 2, nodes_route.unsqueeze(-1).expand(-1, -1, -1, 2)) #shape (batch, pomo, 3, 2)
     nodes_num = nodes_num - 1
     # nodes_route_coords[:, :, 2, :] = torch.where(cur_index.unsqueeze(-1).expand(-1, -1, 2) < nodes_num.unsqueeze(-1).expand(-1, -1, 2), nodes_route_coords[:, :, 2, :], depot.unsqueeze(1).expand(-1, pomo, -1))
@@ -95,7 +97,7 @@ def update_duration_mask(cur_mask, cur_routes, routes_cost, service_time,   max_
     padding = padding*10 #shape (batch, pomo, n, n)
     distances = distances + padding
     new_distances = distances.clone()
-    new_distances = torch.concat((xy_depot, new_distances), dim = 3) # shape (batch, pomo, n, n+1)
+    new_distances = torch.cat((xy_depot, new_distances), dim = 3) # shape (batch, pomo, n, n+1)
     distances[BATCH_IDX, POMO_IDX,ROUTE_IDX, nodes_num + 1] = xy_depot.squeeze(-1)
     selected_route_service_time = selected_route_service_time.unsqueeze(2).expand(-1, -1, n, -1)
     zero = torch.zeros((batch, pomo, n)).to(device)
@@ -103,15 +105,18 @@ def update_duration_mask(cur_mask, cur_routes, routes_cost, service_time,   max_
     selected_route_service_time[BATCH_IDX, POMO_IDX,ROUTE_IDX, nodes_num + 1] = zero
     xy_depot = xy_depot*500
 
-    selected_route_service_time = torch.concat((selected_route_service_time,xy_depot ), dim = 3) # shape (batch, pomo, n, n + 1)
+    selected_route_service_time = torch.cat((selected_route_service_time,xy_depot ), dim = 3) # shape (batch, pomo, n, n + 1)
 
-    distances = torch.concat((distances,xy_depot ), dim = 3) # shape (batch, pomo, n + 1)
+    distances = torch.cat((distances,xy_depot ), dim = 3) # shape (batch, pomo, n + 1)
     cost = distances + new_distances - selected_route_cost.unsqueeze(2) + selected_route_service_time + service_time.unsqueeze(1).unsqueeze(-1).expand(batch, pomo, n, 1) + total_cost.unsqueeze(-1).unsqueeze(-1) <= max_duration.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
     mask = torch.sum(cost, dim = -1) == 0 # shape(batch, pomo, n)
     mask = mask.to(torch.int64)
 
 
     cur_mask[BATCH_IDX.squeeze(-1), POMO_IDX.squeeze(-1), :,  selected_route] = torch.where(cur_mask[BATCH_IDX.squeeze(-1), POMO_IDX.squeeze(-1), :,  selected_route] == 0, mask, 1)
+
+    indices = (mask == 1).nonzero()
+    # print("update duration indices: ", indices)
 
     return cur_mask
 
@@ -124,7 +129,7 @@ def update_demand_mask(cur_demands, node_demand, cur_mask, max_demand, selected_
         cur_mask Tensor shape (batch, pomo, n, n)
         max_demand Tensor shape(batch)
     '''
-    batch,pomo,n = cur_demands.shape()
+    batch,pomo,n = cur_demands.shape
     device = cur_demands.device
     BATCH_IDX = torch.arange(batch)[:, None].expand(batch, pomo).to(device)
     POMO_IDX = torch.arange(pomo)[None, :].expand(batch, pomo).to(device)
@@ -133,7 +138,11 @@ def update_demand_mask(cur_demands, node_demand, cur_mask, max_demand, selected_
     round_error_epsilon = 0.00001
     max_demand = max_demand.unsqueeze(-1).unsqueeze(-1)
     demand_mask = selected_route_demand + node_demand   > max_demand #shape(batch, pomo, n)
-    cur_mask[BATCH_IDX, POMO_IDX, :,  selected_route] = torch.where(cur_mask[BATCH_IDX, POMO_IDX, :,  selected_route] == 0, demand_mask, 1)
+    cur_mask[BATCH_IDX, POMO_IDX, :,  selected_route] = torch.where(cur_mask[BATCH_IDX, POMO_IDX, :,  selected_route] == 0, demand_mask.to(torch.int64), 1)
+
+    indices = (demand_mask == 1).nonzero()
+    # print("demand mask: ", indices)
+    
     return cur_mask
 
     
@@ -193,11 +202,11 @@ def update_route(node_xy, depot,node_demand,service_time, cur_demands, truck_num
     distances = distances + padding
 
     new_distances = distances.clone()
-    new_distances = torch.concat((distance_selected_depot, new_distances), dim = 3) # shape (batch, pomo, n, n+1)
+    new_distances = torch.cat((distance_selected_depot, new_distances), dim = 3) # shape (batch, pomo, n, n+1)
     node_num = node_num + 1
     distances[BATCH_IDX, POMO_IDX,ROUTE_IDX, node_num] = distance_lastnode_depot.squeeze(-1)
     distance_lastnode_depot = distance_lastnode_depot*10
-    distances = torch.concat((distances,distance_lastnode_depot ), dim = 3) # shape (batch, pomo, n + 1)
+    distances = torch.cat((distances,distance_lastnode_depot ), dim = 3) # shape (batch, pomo, n + 1)
     # lost_index = raw_selected_route.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, n + 1)
     # lost_distance = torch.gather(routes_cost, 2,lost_index ).squeeze(2) #shape(batch, pomo, n+1)
     inserted_cost = new_distances + distances - routes_cost #shape (batch, pomo,n, n + 1)
@@ -213,6 +222,10 @@ def update_route(node_xy, depot,node_demand,service_time, cur_demands, truck_num
     selected_new_dis = torch.gather(new_distances, 2, selected_route_index.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, n + 1)).squeeze(2)
     new_nodes_route = torch.zeros((batch,pomo, n + 1),  dtype=torch.int64).to(device)
     expanded_indices = torch.arange(n + 1).expand(batch,pomo, -1).to(device)  # Shape: (batch, n + 1)
+    
+    # print("expanded_indices shape:", expanded_indices.shape)
+    # print("insert_index shape:", insert_index.unsqueeze(1).shape)
+    
     mask_before = expanded_indices < insert_index.unsqueeze(1)  # Shape: (batch, n+1)
     mask_after = expanded_indices > insert_index.unsqueeze(1)
     new_nodes_route[mask_before] = selected_node_route[mask_before[:, :, :-1]]
@@ -228,11 +241,11 @@ def update_route(node_xy, depot,node_demand,service_time, cur_demands, truck_num
     new_route_cost[mask_after] = lost_distance[mask_after[:, :, 1:]]
     new_route_cost[BATCH_IDX, POMO_IDX, insert_index] = selected_new_dis[BATCH_IDX, POMO_IDX, insert_index] +  service_time.unsqueeze(1).expand(-1, pomo, -1)[BATCH_IDX, POMO_IDX, raw_selected_node]
     routes_cost[BATCH_IDX, POMO_IDX, selected_route_index] = new_route_cost[:, :, :-1]
-    truck_num[BATCH_IDX, POMO_IDX, selected_route_index]  += 1
+    truck_num[BATCH_IDX, POMO_IDX, selected_route_index]  = truck_num[BATCH_IDX, POMO_IDX, selected_route_index] + 1
 
 
     node_demand = node_demand.unsqueeze(1).expand(-1, pomo, -1)
-    cur_demands[BATCH_IDX, POMO_IDX, selected_route_index] += node_demand[BATCH_IDX, POMO_IDX, raw_selected_node]
+    cur_demands[BATCH_IDX, POMO_IDX, selected_route_index] = cur_demands[BATCH_IDX, POMO_IDX, selected_route_index] + node_demand[BATCH_IDX, POMO_IDX, raw_selected_node]
 
     return cur_routes, routes_cost, truck_num, cur_demands, insert_index,selected_route_index
 
@@ -245,7 +258,7 @@ def init_travel_time_demand( depot, node_xy, node_demand, service_time,  node_in
     Computes the travel time from the depot to a set of nodes identified by indices.
 
     Args:
-        depot_xy (torch.Tensor): Tensor of shape (batch, 1, 2) representing depot coordinates.
+        depot (torch.Tensor): Tensor of shape (batch, 1, 2) representing depot coordinates.
         node_xy (torch.Tensor): Tensor of shape (batch, n, 2) representing coordinates of all nodes.
         node_demand: Tensor of shape(batch, n)
         node_indices (torch.Tensor): Tensor of shape (batch, m) containing indices of nodes to calculate travel time for.
@@ -259,6 +272,14 @@ def init_travel_time_demand( depot, node_xy, node_demand, service_time,  node_in
     device = depot.device
 
     depot = depot.unsqueeze(1)
+
+    print(">>>> depot  ", depot.shape)
+    print(">>>> node_xy  ", node_xy.shape)
+    print(">>>> node_demand  ", node_demand.shape)
+    print(">>>> node_indices  ", node_indices.shape)
+    print(">>>> truck_num  ", truck_num.shape)
+    print(">>>> service_time  ", service_time.shape)
+    print(">>>> max_duration  ", max_duration.shape)
 
     routes_demand = torch.gather(node_demand, 1, node_indices)
     routes_demand = routes_demand * truck_num
@@ -289,15 +310,13 @@ def init_travel_time_demand( depot, node_xy, node_demand, service_time,  node_in
 
 
     distances= torch.sqrt(torch.sum((selected_node_xy.unsqueeze(1) - node_xy.unsqueeze(2)) ** 2, dim=-1)).unsqueeze(-1)/speed  # shape (batch, n, n, 1)
-    xy_depot = torch.sqrt(torch.sum((depot.unqueeze(1).unsqueeze(1) - node_xy.unsqueeze(2)) ** 2, dim = -1)).unsqueeze(2).expand(-1, -1, n, 1)/ speed #shape(batch, n,n, 1)
+    xy_depot = torch.sqrt(torch.sum((depot.unsqueeze(2) - node_xy.unsqueeze(2)) ** 2, dim = -1)).unsqueeze(2).expand(-1, -1, n, 1) / speed #shape(batch, n,n, 1)
 
     distances = distances + xy_depot  + service_time.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, n, 1) + selected_service_time.unsqueeze(1).unsqueeze(-1).expand(-1, n, n, 1)
 
     cost =  distances > max_duration.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
 
-
-
-    routes_matrix = torch.zeros((batch, n, n ), device=device)
+    routes_matrix = torch.zeros((batch, n, n), device=device, dtype=torch.int64)
     routes_matrix[:, :m, 0] = node_indices
 
    
@@ -416,7 +435,6 @@ class VRPLTWEnv:
         # shape: (batch, problem+1)
 
         self.speed = 1.0
-        self.speed = self.speed.to(self.device)
         self.depot_start, self.depot_end = 0., 3.  # tw for depot [0, 3]
 
         # Dynamic-1
@@ -434,17 +452,19 @@ class VRPLTWEnv:
 
     def load_problems(self, batch_size, problems=None, aug_factor=1):
         if problems is not None:
+
+            self.problem_data = problems
+            
             depot_xy, node_xy, node_demand, route_limit, service_time, tw_start, tw_end, init_routes, mask_node, truck_num, max_demand = problems
         else:
             depot_xy, node_xy, node_demand, route_limit, service_time, tw_start, tw_end, init_routes, mask_node, truck_num, max_demand = self.get_random_problems(batch_size, self.problem_size, normalized=True)
-        self.batch_size = depot_xy.size(0).to(self.device)
+        self.batch_size = depot_xy.size(0)
         
-        self.num_problem = node_xy.size(1).to(self.device)
+        self.num_problem = node_xy.size(1)
         self.mask_node = mask_node.to(self.device)
 
         self.node_xy = node_xy.to(self.device)
         self.depot = depot_xy.to(self.device)
-        self.depot_node_xy = torch.cat((depot_xy, node_xy), dim=1).to(self.device)
 
         # shape: (batch, problem+1, 2)
         # shape: (batch, 1)
@@ -475,11 +495,10 @@ class VRPLTWEnv:
         self.step_state.PROBLEM = self.problem
         self.step_state.truck_num = self.truck_num.unsqueeze(1).expand(self.batch_size, self.pomo_size,-1).to(self.device)
 
-        self.step_state.cur_travel_time_routes, self.step_state.current_routes,  self.step_state.cur_demands, self.duration_mask = init_travel_time_demand(self.depot, self.node_xy,self.node_demand, self.init_routes,self.route_limit, self.truck_num, self.speed)
+        self.step_state.cur_travel_time_routes, self.step_state.current_routes,  self.step_state.cur_demands, self.duration_mask = init_travel_time_demand(self.depot, self.node_xy, self.node_demand, self.service_time, self.init_routes, self.route_limit, self.truck_num, self.speed)
         self.step_state.cur_travel_time_routes = self.step_state.cur_travel_time_routes.unsqueeze(1).expand(-1, self.pomo_size, -1, -1)
         self.step_state.current_routes = self.step_state.current_routes.unsqueeze(1).expand(-1, self.pomo_size, -1, -1)
         self.step_state.cur_demands = self.step_state.cur_demands.unsqueeze(1).expand(-1, self.pomo_size, -1)
-
 
     def reset(self):
         self.selected_count = 0
@@ -489,14 +508,28 @@ class VRPLTWEnv:
         #shape: (batch, pomo)
 
         # shape: (batch, pomo, problem+1)
-        self.init_mask = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size,self.problem_size )).to(self.device)
+        self.init_mask = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size,self.problem_size ), dtype = torch.int64).to(self.device)
+        # print("init_routes: ", self.init_routes[0])
         zero_mask = (self.step_state.truck_num == 0)  # Shape: (batch, pomo, m)
+        
         zero_mask = zero_mask.unsqueeze(2).expand(self.batch_size, self.pomo_size, self.problem_size, -1)
-        self.init_mask[zero_mask] = 1
-        mask_node = self.mask_node.unsqueeze(1).unsqueeze(-1).expand(-1, self.pomo_size, self.problem_size, self.problem_size)
-        self.init_mask[mask_node] = 1
+        # print("zero_mask: ", zero_mask.sum(dim = -2)[0])
+
+        self.init_mask = self.init_mask | zero_mask
+        # print("self.init_mask: ", torch.sum(self.init_mask, dim=-1)[0])
+        self.mask_node = self.mask_node.unsqueeze(1).expand(-1, self.pomo_size, -1)
+        mask_node = self.mask_node.unsqueeze(-1).expand(-1, self.pomo_size, self.problem_size, self.problem_size)
+        # print("mask_node: ", mask_node.sum(dim = -1)[0])
+        self.init_mask = self.init_mask | mask_node
+        # print("init_mask: ", self.init_mask.sum(dim = -1)[0])
+
         self.ninf_mask = self.init_mask.clone()
-        self.ninf_mask = torch.where(self.ninf_mask == 1, 1, self.duration_mask.unsqueeze(1).expand(self.batch_size, self.pomo_size, -1, -1))
+        # print("duration_mask: ", self.duration_mask[0])
+        # print("self.ninf_mask: ", torch.sum(self.ninf_mask, dim=-1)[0])
+
+        self.ninf_mask = torch.where(self.ninf_mask == 0, self.duration_mask.unsqueeze(1).expand(self.batch_size, self.pomo_size, -1, -1).to(torch.int64), 1)
+
+        
         # # shape: (batch, pomo, problem+1)
         # self.finished = torch.zeros(size=(self.batch_size, self.pomo_size), dtype=torch.bool).to(self.device)
         # # shape: (batch, pomo)
@@ -514,7 +547,9 @@ class VRPLTWEnv:
     def pre_step(self):
         self.step_state.current_node = self.current_node
         self.step_state.ninf_mask = self.ninf_mask
-        self.step_state.mask = torch.where(torch.sum(self.ninf_mask, dim = -1) == self.problem_size, float('-inf'), 0).to(self.device)
+        self.step_state.mask = torch.where(torch.sum(self.ninf_mask, dim = -1) == self.problem_size, float('-inf'), 0.0).to(self.device)
+
+        # print("self.step_state.mask: ", self.step_state.mask[0])
 
         # self.step_state.finished = self.finished
         # self.step_state.current_time = self.current_time
@@ -528,32 +563,120 @@ class VRPLTWEnv:
     def step(self, selected):
         # selected.shape: (batch, pomo)
 
+        # print("mask: ", self.step_state.mask)
+        # print("selected: ", selected)
+
         # Dynamic-1
         ####################################
-        self.selected_count += 1
         self.current_node = selected #shape (batch, pomo)
         # self.current_route = s #shape(batch, pomo)
+        self.old_routes = self.step_state.current_routes.clone()
+        self.routes_cost  = self.step_state.cur_travel_time_routes.clone()
+        sef.old_truck = self.step_state.truck_num.clone()
+        self.old_demand = self.step_state.cur_demands.clone()
+        self.old_mask = self.step_state.ninf_mask.clone()
         self.node_mask = torch.gather(self.step_state.ninf_mask, 2,self.current_node.unsqueeze(-1).unsqueeze(-1).expand(-1,-1, 1, self.problem_size)).squeeze(2)
-        self.step_state.current_routes, self.step_state.cur_travel_time_routes, self.step_state.truck_num, self.step_state.cur_demands, self.step_state.cur_index, self.current_route  = update_route(self.node_xy, self.depot, self.node_demand,self.service_time, self.step_state.cur_demands, self.step_state.truck_num,self.step_state.current_routes, self.step_state.cur_travel_time_routes, self.current_node,self.node_mask, self.speed)
+        self.step_state.current_routes, self.step_state.cur_travel_time_routes, self.step_state.truck_num, self.step_state.cur_demands, self.step_state.cur_index, self.current_route = update_route(self.node_xy, self.depot, self.node_demand, self.service_time, self.step_state.cur_demands, self.step_state.truck_num, self.step_state.current_routes, self.step_state.cur_travel_time_routes, self.current_node,self.node_mask, self.speed)
 
-
-
-
+        # print("cur route: ", self.current_route)
+        # print("step state cur route: ", self.step_state.current_routes)
+        # print("cost: ", torch.sum(self.step_state.cur_travel_time_routes, dim=-1))
+        # print("demand: ", self.step_state.cur_demands)
+        
+        
         # Mask
+
+        self.init_mask[self.BATCH_IDX, self.POMO_IDX, self.current_node, :] = 1 
+        self.mask_node[self.BATCH_IDX, self.POMO_IDX, self.current_node] = 1
+
+        self.step_state.init_mask = self.init_mask
+        
         self.step_state.ninf_mask[self.BATCH_IDX, self.POMO_IDX, :, self.current_route] = self.init_mask[self.BATCH_IDX, self.POMO_IDX, :, self.current_route]
         self.step_state.ninf_mask[self.BATCH_IDX, self.POMO_IDX, self.current_node, :] = 1
 
        
-        self.step_state.ninf_mask = update_demand_mask(self.step_state.cur_demands, self.node_demand, self.step_state.ninf_mask, self.max_demand,self.current_route)
+        self.step_state.ninf_mask = update_demand_mask(self.step_state.cur_demands, 
+                                                       self.node_demand, 
+                                                       self.step_state.ninf_mask, 
+                                                       self.max_demand,
+                                                       self.current_route)
 
         #route limit constraint
-        self.step_state.ninf_mask = update_duration_mask(self.step_state.ninf_mask, self.step_state.current_routes,self.step_state.cur_travel_time_routes,self.service_time, self.route_limit,self.step_state.truck_num,self.current_route, self.node_xy,self.depot, self.speed)
+        self.step_state.ninf_mask = update_duration_mask(self.step_state.ninf_mask, 
+                                                         self.step_state.current_routes,
+                                                         self.step_state.cur_travel_time_routes,
+                                                         self.service_time, 
+                                                         self.route_limit,
+                                                         self.step_state.truck_num,
+                                                         self.current_route, 
+                                                         self.node_xy,
+                                                         self.depot, 
+                                                         self.speed)
         self.c_mask = torch.sum(self.step_state.ninf_mask, dim = -1)
         
-        self.mask = torch.where(self.c_mask == self.problem_size, float('-inf'), 0)
+        self.mask = torch.where(self.c_mask == self.problem_size, float('-inf'), 0.0)
 
 
-        self.step_state.mask = self.mask
+        self.step_state.mask = self.mask 
+
+        self.c_mask = torch.sum(self.c_mask, dim=-1).squeeze(1)
+        indices = (self.c_mask == self.problem_size * self.problem_size).nonzero()
+        if indices.size(0) > 0:
+            indices = (tensor == 0).argmax(dim=1) # shape(k), k< batch
+            k = indices.size(0)
+            selected = self.current_node[indices] # shape(k, pomo)
+            enode_demand = self.node_demand[indices]
+            
+            etruck_num  = self.old_truck[indices]
+            eroutes = self.old_routes[indices]
+            ecost = self.routes_cost[indices]
+            edemand = self.old_demand[indices]
+            emask = self.old_mask[indices]
+            zero_indices = (etruck_num == 0).argmax(dim=2)  # shape (k,1)
+            self.K_IDX = torch.arange(k)[:, None].expand(k, self.pomo_size).to(self.device)
+            etruck_num[ self.K_IDX, self.POMO_IDX, zero_indices] = 1
+            eroutes[self.K_IDX, self.POMO_IDX, zero_indices, :] = selected
+            select_demand = torch.gather(enode_demand.unsqueeze(1).expand(-1, self.pomo_size, -1),2,  selected.unsqueeze(-1))
+            edemand[ self.K_IDX, self.POMO_IDX, zero_indices] = select_demand.squeeze(-1)
+            selected_node_xy = torch.gather(self.node_xy.unsqueeze(-1, self.pomo_size, -1, -1), 2, selected.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 2))  # Shape: (batch, m, 2)
+            selected_service_time= torch.gather(service_time.unsqueeze(-1, self.pomo_size, -1), 2, selected.unsqueeze(-1).expand(-1, -1, 1)).squeeze(-1) 
+            
+            # Compute the difference in coordinates
+            delta = selected_node_xy - self.depot.unsqueeze(1)  # Shape: (batch, m, 1, 2)
+        
+            # Compute Euclidean distances
+            distances = torch.sqrt(torch.sum(delta ** 2, dim=-1)).squeeze(-1)  # Shape: (batch, m, 1)
+        
+            # Compute travel time by dividing distance by speed
+            travel_times = distances / self.speed 
+            ecost[ self.K_IDX, self.POMO_IDX, zero_indices, 0] =  travel_times + selected_service_time
+
+            ecost[ self.K_IDX, self.POMO_IDX, zero_indices, 1] =  travel_times 
+            
+            
+            
+
+            
+            
+            
+            
+            
+
+            
+
+            
+            
+            
+
+        # indices = (self.c_mask == self.problem_size * self.problem_size).nonzero()
+        
+        # if indices.size(0) > 0:
+        #     temp_data = [self.problem_data[i][indices[0]] for i in range(11)]
+        #     print()
+        #     for data in temp_data:
+        #         print(data)
+        
+        # print("mask 2: ", self.step_state.mask)
 
         # returning values
         done = self.step_state.done
@@ -619,12 +742,14 @@ class VRPLTWEnv:
         tw_start = torch.zeros(size=(num_instances, 1)).to(self.device)
         tw_end = torch.zeros(size=(num_instances, 1)).to(self.device)
 
+        # pickle_data = [depot_xy, node_xy, node_demand, route_limit, service_time, init_routes, mask_node, truck_num, capacity, solomon_cost]
+
         self.train_dataset = [
+                    train_data[0].squeeze(1).to(self.device),
                     train_data[1].to(self.device),
                     train_data[2].to(self.device),
                     train_data[3].to(self.device),
                     train_data[4].to(self.device),
-                    train_data[0].to(self.device),
                     tw_start,
                     tw_end,
                     train_data[5].clone().detach().to(dtype=torch.int64).to(self.device),
@@ -644,11 +769,11 @@ class VRPLTWEnv:
         tw_end = torch.zeros(size=(num_instances, 1)).to(self.device)
 
         self.val_dataset = [
-                    val_data[1].to(self.device), # depot_xy
-                    val_data[2].to(self.device), # node_xy
-                    val_data[3].to(self.device), # node_demand
-                    val_data[4].to(self.device), # route_limit
-                    val_data[0].to(self.device), # service_time
+                    val_data[0].squeeze(1).to(self.device), # depot_xy
+                    val_data[1].to(self.device), # node_xy
+                    val_data[2].to(self.device), # node_demand
+                    val_data[3].to(self.device), # route_limit
+                    val_data[4].to(self.device), # service_time
                     tw_start,
                     tw_end,
                     val_data[5].clone().detach().to(dtype=torch.int64).to(self.device), # init_routes
@@ -660,23 +785,103 @@ class VRPLTWEnv:
 
     def get_batch_data(self, mode, batch_size):
         if mode == "train":
-            ntruck = random.choice((self.train_ntruck_category).keys())
+            ntruck = random.choice(list(self.train_ntruck_category.keys()))
             batch_idx = random.sample(self.train_ntruck_category[ntruck], batch_size)
 
             batch_data = tuple(torch.stack([self.train_dataset[i][idx] for idx in batch_idx]) for i in range(len(self.train_dataset)))
         
         else:
-            ntruck = random.choice((self.val_ntruck_category).keys())
+            ntruck = random.choice(list((self.val_ntruck_category).keys()))
             batch_idx = random.sample(self.val_ntruck_category[ntruck], batch_size)
 
             batch_data = tuple(torch.stack([self.val_dataset[i][idx] for idx in batch_idx]) for i in range(len(self.val_dataset)))
 
-        return (batch_data, ntruck)
+        print(">>>>>>> ntruck ", ntruck)
+        
+        return (batch_data, int(ntruck))
     
     def get_random_problems(self, mode, batch_size):
-        if self.train_dataset is None:
-            self.load_pkl_data()
-        return self.get_batch_data(mode, batch_size)                
+        # if self.train_dataset is None:
+        #     self.load_pkl_data()
+        # return self.get_batch_data(mode, batch_size)    
+        data = [
+            torch.tensor([[0.1294, 0.4987]]),
+            torch.tensor([[[0.1805, 0.3714],
+                     [0.0928, 0.2687],
+                     [0.0677, 0.9520],
+                     [0.6354, 0.3108],
+                     [0.8685, 0.9355],
+                     [0.7596, 0.9022],
+                     [0.9331, 0.1802],
+                     [0.8760, 0.7106],
+                     [0.9255, 0.8798],
+                     [0.8981, 0.4332],
+                     [0.9541, 0.8274],
+                     [0.7320, 0.4478],
+                     [0.2886, 0.9342],
+                     [0.1714, 0.1963],
+                     [0.2627, 0.2424],
+                     [0.7302, 0.3479],
+                     [0.0654, 0.5889],
+                     [0.3937, 0.8577],
+                     [0.0075, 0.9549],
+                     [0.8513, 0.4495],
+                     [0.9873, 0.9746],
+                     [0.5572, 0.7557],
+                     [0.2906, 0.7220],
+                     [0.1334, 0.3847],
+                     [0.8979, 0.6113],
+                     [0.8266, 0.5148],
+                     [0.2219, 0.4461],
+                     [0.1626, 0.3837],
+                     [0.3395, 0.7275],
+                     [0.1854, 0.6380],
+                     [0.1392, 0.9267],
+                     [0.6791, 0.6457],
+                     [0.6133, 0.2108],
+                     [0.9650, 0.2945],
+                     [0.1393, 0.2767],
+                     [0.9385, 0.1725],
+                     [0.0746, 0.0277],
+                     [0.9909, 0.1188],
+                     [0.9848, 0.2015],
+                     [0.9495, 0.9896],
+                     [0.0401, 0.3935],
+                     [0.8824, 0.0574],
+                     [0.2531, 0.4751],
+                     [0.0828, 0.2982],
+                     [0.0851, 0.3392],
+                     [0.6903, 0.2218],
+                     [0.5135, 0.7989],
+                     [0.3205, 0.2812],
+                     [0.9034, 0.1054],
+                     [0.9585, 0.3415]]]),
+            torch.tensor([[0.2000, 0.0750, 0.2250, 0.1750, 0.1750, 0.2250, 0.0250, 0.0500, 0.1500,
+                     0.1000, 0.1250, 0.0750, 0.1250, 0.0250, 0.1500, 0.1000, 0.1500, 0.2250,
+                     0.1500, 0.0500, 0.0500, 0.0500, 0.0250, 0.1000, 0.2000, 0.0750, 0.1250,
+                     0.1000, 0.1500, 0.0500, 0.1750, 0.0750, 0.0250, 0.0250, 0.1500, 0.1750,
+                     0.2000, 0.0500, 0.0750, 0.1250, 0.1250, 0.1000, 0.1250, 0.1500, 0.1000,
+                     0.2250, 0.2000, 0.2250, 0.0500, 0.1750]]),
+            torch.tensor([3.]),
+            torch.tensor([[0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,
+                     0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,
+                     0., 0.]]),
+            torch.tensor([[0.]]),
+            torch.tensor([[0.]]),
+            torch.tensor([[22,  7, 15, 25, 37, 38, 20,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+                      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+                      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0]]),
+            torch.tensor([[0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0,
+                     0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                     0, 0]]),
+            torch.tensor([[5, 4, 2, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                     0, 0]]),
+            torch.tensor([1.]),
+            torch.tensor([100.])
+        ]
+
+        return (tuple(data), 7)
 
 
 

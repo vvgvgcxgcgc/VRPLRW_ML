@@ -1,7 +1,8 @@
 import re
 from torch.optim import Adam as Optimizer
 from torch.optim.lr_scheduler import MultiStepLR as Scheduler
-
+import torch
+torch.autograd.set_detect_anomaly(True)
 from utils import *
 
 
@@ -58,15 +59,15 @@ class Trainer:
 
             # MTL Validation & save latest images
             if epoch == 1 or (epoch % validation_interval == 0):
-                val_problems = ["CVRP", "OVRP", "VRPB", "VRPL", "VRPTW", "OVRPTW",
-                                "OVRPB", "OVRPL", "VRPBL", "VRPBTW", "VRPLTW", "OVRPBL", "OVRPBTW", "OVRPLTW", "VRPBLTW", "OVRPBLTW"]
+                val_problems = ["VRPLTW"]
                 val_episodes, problem_size = 1000, self.env_params['problem_size']
                 dir = [os.path.join("./data", prob) for prob in val_problems]
                 paths = ["{}{}_uniform.pkl".format(prob.lower(), problem_size) for prob in val_problems]
                 val_envs = [get_env(prob)[0] for prob in val_problems]
+                print("val envs: ", val_envs)
                 for i, path in enumerate(paths):
                     # if no optimal solution provided, set compute_gap to False
-                    score, gap = self._val_and_stat(dir[i], path, val_envs[i](**{"problem_size": problem_size, "pomo_size": problem_size}), batch_size=100, val_episodes=val_episodes, compute_gap=True)
+                    score, gap = self._val_and_stat(dir[i], path, val_envs[i](**{"problem_size": problem_size, "pomo_size": 1}), batch_size=1, val_episodes=val_episodes, compute_gap=True)
                     self.result_log["val_score"].append(score)
                     self.result_log["val_gap"].append(gap)
 
@@ -103,15 +104,20 @@ class Trainer:
             remaining = train_num_episode - episode
             batch_size = min(self.trainer_params['train_batch_size'], remaining)
 
+            # print(">>>>>>>>>> ", random.sample(self.envs, 1)[0])
+            
             env = random.sample(self.envs, 1)[0](**self.env_params)
 
             data = env.get_random_problems(mode, batch_size)
             
-            avg_score, avg_loss = self._train_one_batch(data, env)
+            # avg_score, avg_loss = self._train_one_batch(data, env)
+            self._train_one_batch(data, env)
 
-            score_AM.update(avg_score, batch_size)
-            loss_AM.update(avg_loss, batch_size)
+            # score_AM.update(avg_score, batch_size)
+            # loss_AM.update(avg_loss, batch_size)
             episode += batch_size
+
+            # break
 
         # Log Once, for each epoch
         print('Epoch {:3d}: Train ({:3.0f}%)  Score: {:.4f},  Loss: {:.4f}'.format(epoch, 100. * episode / train_num_episode, score_AM.avg, loss_AM.avg))
@@ -136,31 +142,43 @@ class Trainer:
         finis = 0
         # print("{}\n".format(state.PROBLEM))
         while (finis < n - num):
-            selected, prob = self.model(state)
-            # shape: (batch, pomo)
-            if(finis == n -num - 1): env.step_state.done = True
-            state, reward, done = env.step(selected)
+            try:
+                selected, prob = self.model(state)
+                # shape: (batch, pomo)
+                if (finis == n -num - 1): env.step_state.done = True
+                state, reward, done = env.step(selected)
+            except:
+                print(">>>>> Finis: ", finis)
+                print("init mask: ", env.step_state.init_mask)
+                print("demand: ", env.step_state.cur_demands)
+                print("cost: ", env.step_state.cur_travel_time_routes.sum(dim = -1))
+
+                
+
+            # print("Decode: ", finis)
+            # print("-------------------------------------------------------------------------------------------------------")
             prob_list = torch.cat((prob_list, prob[:, :, None]), dim=2)
             finis  = finis + 1
 
-        # Loss
-        advantage = reward.squeeze(1) + pomo_cost  # (batch, pomo)
-        prob_list = prob_list.squeeze(1)
-        log_prob = prob_list.log().sum(dim=1)
-        loss = -advantage * log_prob  # Minus Sign: To Increase REWARD
-        loss_mean = loss.mean()
-        max_pomo_reward= reward # get best results from pomo
-        score_mean = -max_pomo_reward.float().mean()  # negative sign to make positive value
+        # # Loss
+        # advantage = reward.squeeze(1) + pomo_cost  # (batch, pomo)
+        # prob_list = prob_list.squeeze(1)
+        # log_prob = prob_list.log().sum(dim=1)
+        # loss = -advantage * log_prob  # Minus Sign: To Increase REWARD
+        # loss_mean = loss.mean()
+        # max_pomo_reward= reward # get best results from pomo
+        # score_mean = -max_pomo_reward.float().mean()  # negative sign to make positive value
 
-        if hasattr(self.model, "aux_loss"):
-            loss_mean = loss_mean + self.model.aux_loss  # add aux(moe)_loss for load balancing (default coefficient: 1e-2)
+        # if hasattr(self.model, "aux_loss"):
+        #     loss_mean = loss_mean + self.model.aux_loss  # add aux(moe)_loss for load balancing (default coefficient: 1e-2)
 
-        # Step & Return
-        self.model.zero_grad()
-        loss_mean.backward()
-        self.optimizer.step()
+        # # Step & Return
+        # self.model.zero_grad()
+        # loss_mean.backward()
+        # self.optimizer.step()
 
-        return score_mean.item(), loss_mean.item()
+        # return score_mean.item(), loss_mean.item()
+        return None
 
     def _val_one_batch(self, data, env, aug_factor=1, eval_type="argmax"):
         self.model.eval()
@@ -178,6 +196,7 @@ class Trainer:
             state, reward, done = env.pre_step()
             while (finis < n - num):
                 selected, _ = self.model(state)
+                print("________val seleted: ", selected)
                 # shape: (batch, pomo)
                 if(finis == n -num - 1): env.step_state.done = True
                 state, reward, done = env.step(selected)
