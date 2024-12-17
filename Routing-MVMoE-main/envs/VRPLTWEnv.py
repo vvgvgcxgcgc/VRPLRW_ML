@@ -635,10 +635,11 @@ class VRPLTWEnv:
             enodemask = self.mask_node[indices]
             zero_indices = (etruck_num == 0).argmax(dim=2)  # shape (k,1)
             self.K_IDX = torch.arange(k)[:, None].expand(k, self.pomo_size).to(self.device)
-            etruck_num[ self.K_IDX, self.POMO_IDX, zero_indices] = 1
-            eroutes[self.K_IDX, self.POMO_IDX, zero_indices, :] = selected
+            self.POMO_IDX1 = torch.arange(self.pomo_size)[None, :].expand(k, self.pomo_size).to(self.device)
+            etruck_num[ self.K_IDX, self.POMO_IDX1, zero_indices] = 1
+            eroutes[self.K_IDX, self.POMO_IDX1, zero_indices, :] = selected
             select_demand = torch.gather(enode_demand.unsqueeze(1).expand(-1, self.pomo_size, -1),2,  selected.unsqueeze(-1))
-            edemand[ self.K_IDX, self.POMO_IDX, zero_indices] = select_demand.squeeze(-1)
+            edemand[ self.K_IDX, self.POMO_IDX1, zero_indices] = select_demand.squeeze(-1)
             selected_node_xy = torch.gather(self.node_xy[indices].unsqueeze(-1, self.pomo_size, -1, -1), 2, selected.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 2))  # Shape: (batch, m, 2)
             selected_service_time= torch.gather(self.service_time[indices].unsqueeze(-1, self.pomo_size, -1), 2, selected.unsqueeze(-1).expand(-1, -1, 1)).squeeze(-1) 
             
@@ -650,11 +651,11 @@ class VRPLTWEnv:
         
             # Compute travel time by dividing distance by speed
             travel_times = distances / self.speed 
-            ecost[ self.K_IDX, self.POMO_IDX, zero_indices, 0] =  travel_times + selected_service_time
+            ecost[ self.K_IDX, self.POMO_IDX1, zero_indices, 0] =  travel_times + selected_service_time
 
-            ecost[ self.K_IDX, self.POMO_IDX, zero_indices, 1] =  travel_times 
+            ecost[ self.K_IDX, self.POMO_IDX1, zero_indices, 1] =  travel_times 
 
-            emask[ self.K_IDX, self.POMO_IDX, :, zero_indices] = 0
+            emask[ self.K_IDX, self.POMO_IDX1, :, zero_indices] = 0
             emask = emask | (enodemask.unsqueeze(-1).expand(-1, -1, -1, self.problem_size))
             emask = update_demand_mask(edemand, 
                                         self.node_demand[indices], 
