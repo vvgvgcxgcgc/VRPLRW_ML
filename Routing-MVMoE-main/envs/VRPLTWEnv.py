@@ -622,7 +622,6 @@ class VRPLTWEnv:
         self.c_mask = torch.sum(self.c_mask, dim=-1).squeeze(1)
         indices = (self.c_mask == self.problem_size * self.problem_size).nonzero()
         if indices.size(0) > 0:
-            indices = (tensor == 0).argmax(dim=1) # shape(k), k< batch
             k = indices.size(0)
             selected = self.current_node[indices] # shape(k, pomo)
             enode_demand = self.node_demand[indices]
