@@ -29,14 +29,14 @@ def args2dict(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MVMoE: Multi-Task Vehicle Routing Solver with Mixture-of-Experts")
     # env_params
-    parser.add_argument('--problem', type=str, default="ALL", choices=["ALL", "CVRP", "OVRP", "VRPB", "VRPL", "VRPTW", "OVRPTW",
+    parser.add_argument('--problem', type=str, default="VRPL", choices=["ALL", "CVRP", "OVRP", "VRPB", "VRPL", "VRPTW", "OVRPTW",
                                                                        "OVRPB", "OVRPL", "VRPBL", "VRPBTW", "VRPLTW",
                                                                        "OVRPBL", "OVRPBTW", "OVRPLTW", "VRPBLTW", "OVRPBLTW"])
-    parser.add_argument('--problem_size', type=int, default=100)
-    parser.add_argument('--pomo_size', type=int, default=100, help="the number of start node, should <= problem size")
+    parser.add_argument('--problem_size', type=int, default=50)
+    parser.add_argument('--pomo_size', type=int, default=50, help="the number of start node, should <= problem size")
 
     # model_params
-    parser.add_argument('--model_type', type=str, default="MOE_LIGHT", choices=["SINGLE", "MTL", "MOE", "MOE_LIGHT"])
+    parser.add_argument('--model_type', type=str, default="MTL", choices=["SINGLE", "MTL", "MOE", "MOE_LIGHT"])
     parser.add_argument('--embedding_dim', type=int, default=128)
     parser.add_argument('--sqrt_embedding_dim', type=float, default=128**(1/2))
     parser.add_argument('--encoder_layer_num', type=int, default=6, help="the number of MHA in encoder")
@@ -55,7 +55,7 @@ if __name__ == "__main__":
     parser.add_argument('--routing_method', type=str, default="input_choice", choices=["input_choice", "expert_choice", "soft_moe", "random"], help="only activate for instance-level and token-level routing")
 
     # tester_params
-    parser.add_argument('--checkpoint', type=str, default="./checkpoint/epoch-5000.pt", help="load pretrained model to evaluate")
+    parser.add_argument('--checkpoint', type=str, default="./pretrained/pomo_mtl_n50/epoch-5000.pt", help="load pretrained model to evaluate")
     parser.add_argument('--test_episodes', type=int, default=1000)
     parser.add_argument('--test_batch_size', type=int, default=1000)
     parser.add_argument('--sample_size', type=int, default=10, help="only activate if eval_type is softmax")

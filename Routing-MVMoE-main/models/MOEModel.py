@@ -54,7 +54,7 @@ class MOEModel(nn.Module):
     def set_eval_type(self, eval_type):
         self.eval_type = eval_type
  
-    def forward(self, state, selected=None):
+    def forward(self, state, is_greedy=False, selected=None):
         batch_size = state.BATCH_IDX.size(0)
         pomo_size = state.BATCH_IDX.size(1)
  
@@ -80,12 +80,15 @@ class MOEModel(nn.Module):
         self.decoder.set_q_last(self.encoded_nodes.unsqueeze(1).expand(-1, pomo_size, -1, -1 ))
         # print("MASK:", state.mask)
  
-        probs, moe_loss = self.decoder(encoded_routes, ninf_mask=state.mask)
+        probs, moe_loss = self.decoder(encoded_routes, state.mask,  state.route_mask)
+        # print( ' probs0: ', probs[0])
+        # print( ' probs1: ', probs[1])
+
         self.aux_loss = self.aux_loss + moe_loss
         # shape: (batch, pomo, problem+1)
         if selected is None:
             while True:
-                    if self.training or self.eval_type == 'softmax':
+                    if (self.training or self.eval_type == 'softmax') and not is_greedy:
                         try:
                             # print(">>>>>> probs: ", probs.shape)
                             
@@ -136,6 +139,8 @@ def get_routes_encoding(encoded_nodes, route_index, postion_encodings, truck_num
     pomo = route_index.size(1)
     n = route_index.size(2)
     embedding = encoded_nodes.size(2)
+
+    # print('embedding 2: ',encoded_nodes[0,0])
     # zeros_tensor = torch.zeros(batch_size, 1, embedding)
     # postioned_encoded_nodes = torch.cat([postioned_encoded_nodes, zeros_tensor], dim = 1) #shape (batch, problem +1, embedding + 1 )
 
@@ -148,17 +153,25 @@ def get_routes_encoding(encoded_nodes, route_index, postion_encodings, truck_num
     route_index_expanded = route_index[:, :, :, :, None].expand(-1, -1, -1, -1, embedding).clone()  # Shape: (batch, pomo, problem, problem, embedding)
  
     # Gather encoded_nodes theo route_index 
-    encode_routes = encoded_nodes_expanded.gather(2, route_index_expanded)  # Shape: (batch, pomo, problem, problem, embedding)
+    encode_routes = encoded_nodes_expanded.gather(3, route_index_expanded)  # Shape: (batch, pomo, problem, problem, embedding)
     
     encode_routes = torch.cat((encode_routes, postion_encodings[:, :, :, :-1][:, :, :, :, None]), dim = -1 )
     range_tensor = torch.arange(n)[None, None, None, :]
    
-    mask = range_tensor < truck_num[:, :, :, None]
+    mask = range_tensor < truck_num.unsqueeze(-1)
     mask = mask[:, :, :, :, None].expand(-1, -1, -1, -1, embedding + 1)
     encode_routes = encode_routes*mask
+    # print('encode_routes0', encode_routes[0,0,0, 0])
+    # print('encode_routes1', encode_routes[0,0,1, 0])
     
     # Nếu chỉ muốn shape (batch, pomo, problem, problem), bạn có thể chọn trung bình hoặc giá trị cụ thể theo embedding
-    encode_routes = encode_routes.mean(3)  # Hoặc torch.mean(encode_route, dim=-1)
+    encode_routes = encode_routes.sum(3)  # Hoặc torch.mean(encode_route, dim=-1)
+    node_num = torch.where(truck_num == 0, 1, truck_num)
+    encode_routes = encode_routes/node_num.unsqueeze(-1)
+    # print('encode_routes0', encode_routes[0,0,0])
+    # print('encode_routes1', encode_routes[0,0,1])
+    
+
  
     return encode_routes # shape(batch, pomo, problem, embedding + 1)
  
@@ -300,6 +313,8 @@ class MTL_Decoder(nn.Module):
         self.Wq_last = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         self.Wk = nn.Linear(embedding_dim + 1, head_num * qkv_dim, bias=False)
         self.Wv = nn.Linear(embedding_dim + 1, head_num * qkv_dim, bias=False)
+        self.final = nn.Linear(embedding_dim + 1, 1, bias=False)
+
  
         # [Option 3]: Use MoEs in Decoder
         if self.model_params['num_experts'] > 1 and 'Dec' in self.model_params['expert_loc']:
@@ -322,7 +337,7 @@ class MTL_Decoder(nn.Module):
         self.k = reshape_by_heads1(self.Wk(encoded_routes), head_num=head_num)
         self.v = reshape_by_heads1(self.Wv(encoded_routes), head_num=head_num)
         # shape: (batch, head_num, nr, qkv_dim)
-        self.single_head_key = encoded_routes.transpose(2, 3)
+        # self.single_head_key = encoded_routes.transpose(2, 3)
         # shape: (batch,pomo, embedding + 1, nr)
  
     def set_q1(self, encoded_q1):
@@ -343,7 +358,7 @@ class MTL_Decoder(nn.Module):
  
  
  
-    def forward(self, encoded_routes, ninf_mask):
+    def forward(self, encoded_routes, ninf_mask, route_mask):
         # encoded_last_node.shape: (batch, pomo, embedding)
         # attr.shape: (batch, pomo, 4)
         # ninf_mask.shape: (batch, pomo, problem)
@@ -363,7 +378,7 @@ class MTL_Decoder(nn.Module):
         # q = q_last
         # shape: (batch, head_num, pomo, qkv_dim)
  
-        out_concat = multi_head_attention1(self.q_last, self.k, self.v, rank3_ninf_mask=ninf_mask)
+        out_concat = multi_head_attention1(self.q_last, self.k, self.v,ninf_mask,  route_mask)
         # shape: (batch, pomo, n,  head_num*qkv_dim)
  
         if isinstance(self.multi_head_combine, MoE):
@@ -374,21 +389,29 @@ class MTL_Decoder(nn.Module):
  
         #  Single-Head Attention, for probability calculation
         #######################################################
-        score = torch.matmul(mh_atten_out, self.single_head_key)
+        score = mh_atten_out
         # shape: (batch, pomo,n, problem)
  
         sqrt_embedding_dim = self.model_params['sqrt_embedding_dim']
         logit_clipping = self.model_params['logit_clipping']
  
-        score_scaled = score / sqrt_embedding_dim
+        score_scaled = self.final(score)
+        #/ sqrt_embedding_dim
         # shape: (batch, pomo, problem, nr)
  
         score_clipped = logit_clipping * torch.tanh(score_scaled)
+        score_clipped = score_clipped.squeeze(-1)
  
-        score_masked = torch.mean(score_clipped, dim = -1) + ninf_mask
+        score_masked = score_clipped + ninf_mask
         # print('score_masked', torch.mean(score_clipped, dim = -1)[0])
+
+        # print('score_masked', score_masked[0,0])
+        # print('score_masked1', score_masked[0,0])
+
  
         probs = F.softmax(score_masked, dim=2)
+        # print('score0', score[0][0][0])
+        # print('score1', score[0][0][1])
         # shape: (batch, pomo, problem)
  
         return probs, moe_loss
@@ -481,7 +504,8 @@ def multi_head_attention1(q, k, v, rank2_ninf_mask=None, rank3_ninf_mask=None):
     input_s = k.size(3)
  
     score = torch.matmul(q, k.transpose(3, 4))
-    # print("score: ", score.shape)
+    
+
     # shape: (batch, pomo, head_num, n, problem)
  
     score_scaled = score / torch.sqrt(torch.tensor(key_dim, dtype=torch.float))
@@ -489,16 +513,25 @@ def multi_head_attention1(q, k, v, rank2_ninf_mask=None, rank3_ninf_mask=None):
         pass
         # score_scaled = score_scaled + rank2_ninf_mask[:, None, None, :].expand(batch_s, head_num, n, input_s)
     if rank3_ninf_mask is not None:
-        pass
-        # score_scaled = score_scaled + rank3_ninf_mask[:, :,None, :, None].expand(batch_s,pomo, head_num, n, input_s)
+        score_scaled = score_scaled + rank3_ninf_mask[:, :,None, :, :].expand(batch_s,pomo, head_num, n, input_s)
     
-    # print("score_scaled: ", score_scaled.shape)
+    # print("route mask: ", rank3_ninf_mask[:, :,None, :, :].expand(batch_s,pomo, head_num, n, input_s)[3,0,0,30])
+    # print("score0: ", score_scaled[3,0,0,30])
+    # print("score1: ", score_scaled[3,0,0,32])
     weights = nn.Softmax(dim=4)(score_scaled)
+    
     # print("w: ", weights[0])
-    print()
+    # print()
     # shape: (batch, head_num, n, problem)
- 
+    
+    mask = torch.where( rank2_ninf_mask == 0.0, 1.0, 0.0)
+    mask = mask[:,:, None, :,  None]
+    weights = weights*mask
+    # print("weight0: ", weights[3,0,0,30])
+    # print("weight1: ", weights[3,0,0,32])
     out = torch.matmul(weights, v)
+    # print("out: ", out[3,0,0,30])
+    # print("out: ", out[3,0,0,31])
     # shape: (batch, head_num, n, key_dim)
  
     out_transposed = out.transpose(2, 3)

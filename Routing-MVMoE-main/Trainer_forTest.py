@@ -34,9 +34,9 @@ class Trainer:
             checkpoint_fullname = args.checkpoint
             checkpoint = torch.load(checkpoint_fullname, map_location=self.device)
             self.model.load_state_dict(checkpoint['model_state_dict'], strict=True)
-            self.start_epoch = 1 + checkpoint['epoch']
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            self.scheduler.last_epoch = checkpoint['epoch'] - 1
+            # self.start_epoch = 1 + checkpoint['epoch']
+            # self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            # self.scheduler.last_epoch = checkpoint['epoch'] - 1
             print(">> Checkpoint (Epoch: {}) Loaded!".format(checkpoint['epoch']))
 
         # utility
@@ -49,12 +49,12 @@ class Trainer:
             print('=================================================================')
 
             # Train
-            train_score, train_loss = self._train_one_epoch(epoch)
-            self.scheduler.step()
+            # train_score, train_loss = self._train_one_epoch(epoch)
+            # self.scheduler.step()
 
-            # Logs & Checkpoint
-            elapsed_time_str, remain_time_str = self.time_estimator.get_est_string(epoch, self.trainer_params['epochs'])
-            print("Epoch {:3d}/{:3d}: Time Est.: Elapsed[{}], Remain[{}]".format(epoch, self.trainer_params['epochs'], elapsed_time_str, remain_time_str))
+            # # Logs & Checkpoint
+            # elapsed_time_str, remain_time_str = self.time_estimator.get_est_string(epoch, self.trainer_params['epochs'])
+            # print("Epoch {:3d}/{:3d}: Time Est.: Elapsed[{}], Remain[{}]".format(epoch, self.trainer_params['epochs'], elapsed_time_str, remain_time_str))
 
             all_done = (epoch == self.trainer_params['epochs'])
             model_save_interval = self.trainer_params['model_save_interval']
@@ -64,10 +64,11 @@ class Trainer:
             if epoch == 1 or (epoch % validation_interval == 0):
                 val_problems = ["VRPLTW"]
                 val_episodes, problem_size = self.trainer_params['val_episodes'], self.env_params['problem_size']
-                dir = [os.path.join("./data", prob) for prob in val_problems]
-                paths = ["{}{}_new_uniform.pkl".format(prob.lower(), problem_size) for prob in val_problems]
+                dir = [os.path.join("./data", prob, "/new/") for prob in val_problems]
+                # paths = ["{}{}_new_uniform.pkl".format(prob.lower(), problem_size) for prob in val_problems]
+                paths = ["new_vrpl50_uniform.pkl"]
                 val_envs = [get_env(prob)[0] for prob in val_problems]
-                print("val envs: ", val_envs)
+
                 for i, path in enumerate(paths):
                     # if no optimal solution provided, set compute_gap to False
                     score, gap = self._val_and_stat(dir[i], path, val_envs[i](**{"problem_size": problem_size, "pomo_size": 1}), batch_size=64, val_episodes=val_episodes, compute_gap=True)
@@ -82,20 +83,24 @@ class Trainer:
                     y2.append([r for j, r in enumerate(self.result_log["val_gap"]) if j % len(paths) == i])
                     x.append([j * validation_interval for j in range(len(y1[-1]))])
                     label.append(val_problems[i])
-                show(x, y1, label, title="Validation", xdes="Epoch", ydes="Score", path="{}.pdf".format(score_image_prefix))
-                show(x, y2, label, title="Validation", xdes="Epoch", ydes="Opt. Gap (%)", path="{}.pdf".format(gap_image_prefix))
+                show(x, y1, label, title="Test", xdes="Epoch", ydes="Score", path="{}.pdf".format(score_image_prefix))
+                show(x, y2, label, title="Test", xdes="Epoch", ydes="Opt. Gap (%)", path="{}.pdf".format(gap_image_prefix))
 
-            if all_done or (epoch % model_save_interval == 0):
-                print("Saving trained_model")
-                checkpoint_dict = {
-                    'epoch': epoch,
-                    'problem': self.args.problem,
-                    'model_state_dict': self.model.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                    'scheduler_state_dict': self.scheduler.state_dict(),
-                    'result_log': self.result_log
-                }
-                torch.save(checkpoint_dict, '{}/epoch-{}.pt'.format(self.log_path, epoch))
+            break
+            
+            # if all_done or (epoch % model_save_interval == 0):
+            #     print("Saving trained_model")
+            #     checkpoint_dict = {
+            #         'epoch': epoch,
+            #         'problem': self.args.problem,
+            #         'model_state_dict': self.model.state_dict(),
+            #         'optimizer_state_dict': self.optimizer.state_dict(),
+            #         'scheduler_state_dict': self.scheduler.state_dict(),
+            #         'result_log': self.result_log
+            #     }
+            #     torch.save(checkpoint_dict, '{}/epoch-{}.pt'.format(self.log_path, epoch))
+
+            
 
     def _train_one_epoch(self, epoch):
         episode = 0
